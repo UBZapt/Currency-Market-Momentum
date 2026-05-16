@@ -72,7 +72,17 @@ def main() -> None:
     returns_result = compute_all_returns(panel=data_result.get("panel"))
     log.info("§2 Returns: complete")
 
-    # ── Future sections (signals, portfolios, regressions ...) will go here ──
+    # ── §3: Short-term reversal test ──────────────────────────────────────────
+    log.info("§3 Short-term reversal test: starting ...")
+    from src.regressions import short_term_reversal, print_reversal_table
+    reversal_result = short_term_reversal(
+        returns_panel=returns_result["returns_panel"], verbose=True
+    )
+    print_reversal_table(reversal_result)
+    skip_month_flag = reversal_result["skip_month_flag"]
+    log.info("§3 Short-term reversal: complete — skip_month_flag=%s", skip_month_flag)
+
+    # ── Future sections (signals, portfolios ...) will go here ────────────────
 
     log.info("=" * 60)
     log.info("Pipeline complete.")
