@@ -27,7 +27,6 @@ Outputs (output/):
     ff_factors_clean.csv  — cleaned Fama-French + Carhart factors
     excluded_pegged.csv   — rows removed for HKD / SAR / AED
     schema_mappings.json  — raw-to-standard column maps for all inputs
-    metadata_notes.txt    — assumptions, rules, row counts, validation results
 """
 
 import re
@@ -35,7 +34,6 @@ import sys
 import json
 import logging
 from pathlib import Path
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -46,7 +44,6 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
-LOG_DIR      = PROJECT_ROOT / "logs"
 
 INPUT_PATHS = {
     "fx_spot_usd" : PROJECT_ROOT / "FX_SPOT_Rates_USD.csv",
@@ -112,18 +109,9 @@ _ORIENTATION_REFS = [
 # ──────────────────────────────────────────────────────────────────────────────
 
 def setup_logging() -> logging.Logger:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = LOG_DIR / f"data_clean_{ts}.log"
-    fmt      = "%(asctime)s  %(levelname)-7s  %(message)s"
-    logging.basicConfig(
-        level    = logging.INFO,
-        format   = fmt,
-        handlers = [
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    fmt = "%(asctime)s  %(levelname)-7s  %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt,
+                        handlers=[logging.StreamHandler(sys.stdout)])
     return logging.getLogger("data")
 
 
@@ -134,9 +122,8 @@ def setup_logging() -> logging.Logger:
 def resolve_inputs(paths: dict, log: logging.Logger) -> None:
     missing = [name for name, p in paths.items() if not Path(p).exists()]
     if missing:
-        log.error("GATE 1 FAIL — required files not found: %s", missing)
+        log.error("Required files not found: %s", missing)
         sys.exit(1)
-    log.info("GATE 1 PASS — all required input files present")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -150,18 +137,13 @@ def _short_name(raw: str) -> str:
 
 
 def inspect_schemas(paths: dict, log: logging.Logger) -> dict:
-    """
-    Read one row from each input to detect column names.
-    Returns schema dict: {file_key: {raw_columns, column_mapping}}.
-    """
+    """Read one header row per input; return {file_key: {raw_columns, column_mapping}}."""
     schemas = {}
     for name, path in paths.items():
         sample  = pd.read_csv(path, nrows=1)
         raw     = list(sample.columns)
         col_map = {rc: _short_name(rc) for rc in raw}
         schemas[name] = {"raw_columns": raw, "column_mapping": col_map}
-        log.info("Schema '%s': %s", name, list(col_map.values()))
-    log.info("GATE 2 PASS — schemas inspected for all inputs")
     return schemas
 
 
@@ -173,20 +155,14 @@ def load_metadata(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
     meta = pd.read_csv(path)
     meta.rename(columns=col_map, inplace=True)
     meta.columns = [_short_name(c) for c in meta.columns]
-    log.info("Metadata loaded: %d rows, columns: %s", len(meta), list(meta.columns))
     return meta
 
 
 def map_instruments(meta: pd.DataFrame,
                     log: logging.Logger) -> tuple[dict, dict]:
     """
-    Identify ExRateIntCodes for SPOT and 1MFD instruments where tocurrcode=USD.
-    When a currency has multiple codes for the same rate type, keep the entry
-    with the lowest exrateintcode (primary / oldest series).
-
-    Returns:
-        spot_map    : {currency_iso: exrateintcode}
-        fwd_usd_map : {currency_iso: exrateintcode}  (USD-base 1M forwards only)
+    Return spot_map and fwd_usd_map ({currency_iso: exrateintcode}).
+    When duplicates exist, keep the lowest exrateintcode (primary series).
     """
     usd = meta[meta["tocurrcode"] == "USD"].copy()
 
@@ -208,15 +184,13 @@ def map_instruments(meta: pd.DataFrame,
     spot_only = sorted(set(spot_map) - set(fwd_usd_map))
 
     if not spot_map:
-        log.error("GATE 3 FAIL — no SPOT instruments found in metadata")
+        log.error("No SPOT instruments found in metadata")
         sys.exit(1)
 
-    log.info("Spot instruments:                 %d currencies", len(spot_map))
-    log.info("1M Forward instruments (USD-base): %d currencies", len(fwd_usd_map))
-    log.info("Both spot + USD 1M forward (%d): %s", len(both), both)
-    if spot_only:
-        log.info("Spot-only (no USD 1M forward): %s", spot_only)
-    log.info("GATE 3/4 PASS — join key and instrument identification complete")
+    log.info(
+        "Instruments: %d spot, %d USD 1M fwd, %d both, %d spot-only",
+        len(spot_map), len(fwd_usd_map), len(both), len(spot_only),
+    )
     return spot_map, fwd_usd_map
 
 
@@ -226,11 +200,6 @@ def map_instruments(meta: pd.DataFrame,
 
 def load_fx_chunked(path: Path, col_map: dict, relevant_codes: set,
                     log: logging.Logger) -> pd.DataFrame:
-    """
-    Read an FX rates CSV in fixed-size chunks.
-    Filter each chunk to rows whose instrument code is in relevant_codes.
-    Returns the filtered DataFrame with standardised column names.
-    """
     codes = {int(c) for c in relevant_codes}
 
     chunks        = []
@@ -251,17 +220,13 @@ def load_fx_chunked(path: Path, col_map: dict, relevant_codes: set,
 
     if not chunks:
         log.error(
-            "GATE 4 FAIL — no rows matched any relevant instrument code in %s. "
-            "Check that the metadata and rates files share the same exrateintcode key space.",
+            "No rows matched any instrument code in %s — check exrateintcode key space",
             path.name,
         )
         sys.exit(1)
 
     df = pd.concat(chunks, ignore_index=True)
-    log.info(
-        "%s: scanned %d rows, retained %d rows across %d codes",
-        path.name, total_scanned, total_kept, len(codes),
-    )
+    log.info("%s: %d rows from %d codes", path.name, total_kept, len(codes))
     return df
 
 
@@ -292,16 +257,17 @@ def load_and_invert_non_usd_fwd(
     meta = pd.read_csv(meta_path)
     meta.columns = [_short_name(c) for c in meta.columns]
 
-    # The relevant contract: USD expressed in target_ccy units
-    # fromcurrcode=USD means "USD per 1 target_ccy" in Datastream convention
-    mask     = (meta["fromcurrcode"] == "USD") & (meta["ratetypecode"] == "1MFD")
+    # The relevant contract: fromcurrcode=USD, tocurrcode=target_ccy confirms
+    # this is the USD-per-1-target_ccy series in the target_ccy-base file.
+    mask = (
+        (meta["fromcurrcode"] == "USD") &
+        (meta["ratetypecode"] == "1MFD") &
+        (meta["tocurrcode"] == target_ccy)
+    )
     relevant = meta[mask].copy()
 
     if relevant.empty:
-        log.error(
-            "GATE 4 FAIL — no USD 1MFD entry in %s for %s",
-            meta_path.name, target_ccy,
-        )
+        log.error("No USD 1MFD entry in %s for %s", meta_path.name, target_ccy)
         sys.exit(1)
 
     # Lowest code = primary series if duplicates exist
@@ -313,10 +279,7 @@ def load_and_invert_non_usd_fwd(
     df = df[df["exrateintcode"] == code].copy()
 
     if df.empty:
-        log.error(
-            "GATE 4 FAIL — no rows with code %d in %s",
-            code, rates_path.name,
-        )
+        log.error("No rows with code %d in %s", code, rates_path.name)
         sys.exit(1)
 
     # Invert: CCY/USD -> foreign/USD
@@ -358,11 +321,10 @@ def check_quote_orientation(df: pd.DataFrame, spot_map: dict,
             issues.append(f"{ccy}: median={median:.4f}, expected [{lo}, {hi}]")
 
     if issues:
-        log.warning("GATE 5 WARNING — possible orientation anomaly: %s", issues)
-        log.warning("Proceeding with foreign/USD assumption; review warnings above.")
-    else:
-        log.info("GATE 5 PASS — quote orientation consistent with foreign/USD "
-                 "for all reference currencies")
+        log.error("GATE 5 FAIL — quote orientation anomaly: %s", issues)
+        log.error("All rates must be in foreign/USD convention. Halting pipeline.")
+        sys.exit(1)
+    log.info("Quote orientation check passed")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -401,12 +363,10 @@ def derive_mid_quotes(df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
 
 def aggregate_to_month_end(df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
     """
-    For each (exrateintcode, calendar month), select the last observed trading day.
-    Output 'date' is the last calendar day of the month to align with the
-    Fama-French factor file.  A 2-month buffer before SAMPLE_START is retained
-    so that returns for the first sample month can be computed from Dec 1999 spot.
-
-    dayfirst=True is safe for both ISO (YYYY-MM-DD) and DD/MM/YYYY date formats.
+    Select the last observed trading day per (instrument, month).
+    Output 'date' = last calendar day of month (aligns with FF factors).
+    2-month pre-sample buffer retained for first-month return computation.
+    dayfirst=True handles both ISO and DD/MM/YYYY formats.
     """
     df = df.copy()
     df["exratedate"] = pd.to_datetime(df["exratedate"], dayfirst=True, errors="coerce")
@@ -418,17 +378,14 @@ def aggregate_to_month_end(df: pd.DataFrame, log: logging.Logger) -> pd.DataFram
     df["_ym"] = df["exratedate"].dt.to_period("M")
     df.sort_values(["exrateintcode", "exratedate"], inplace=True)
 
-    grp = df.groupby(["exrateintcode", "_ym"], sort=False)
-    eom = grp[["exratedate", "midrate", "bidrate", "askrate", "mid_derived"]].last().reset_index()
+    # idxmax on exratedate gives the true last trading day per group — all
+    # columns then come from that single row, preventing column mixing.
+    last_idx = df.groupby(["exrateintcode", "_ym"])["exratedate"].idxmax()
+    eom = df.loc[last_idx].reset_index(drop=True)
 
     eom["date"] = eom["_ym"].dt.to_timestamp("M")
     eom.drop(columns=["_ym"], inplace=True)
 
-    log.info(
-        "Month-end aggregation: %d rows across %d unique months",
-        len(eom), eom["date"].nunique(),
-    )
-    log.info("GATE 6 PASS — month-end integrity confirmed")
     return eom
 
 
@@ -438,10 +395,6 @@ def aggregate_to_month_end(df: pd.DataFrame, log: logging.Logger) -> pd.DataFram
 
 def build_instrument_long(eom: pd.DataFrame, spot_map: dict,
                           fwd_map: dict, log: logging.Logger) -> pd.DataFrame:
-    """
-    Attach currency_code and rate_type ('spot' or 'fwd1m') to each row using
-    the reverse maps built from spot_map / fwd_map.
-    """
     code_to_info: dict[int, tuple] = {}
     for ccy, code in spot_map.items():
         code_to_info[int(code)] = (ccy, "spot")
@@ -466,10 +419,6 @@ def build_instrument_long(eom: pd.DataFrame, spot_map: dict,
     keep = ["date", "currency_code", "rate_type", "midrate", "bidrate", "askrate"]
     df   = df[[c for c in keep if c in df.columns]].copy()
 
-    log.info(
-        "Instrument long panel: %d rows, %d unique currencies",
-        len(df), df["currency_code"].nunique(),
-    )
     return df
 
 
@@ -478,14 +427,7 @@ def build_instrument_long(eom: pd.DataFrame, spot_map: dict,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def pivot_to_panel(long_df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
-    """
-    Pivot from long (date, currency_code, rate_type) to wide format:
-
-        date | currency_code | spot_mid | spot_bid | spot_ask |
-        forward_mid_1m | forward_bid_1m | forward_ask_1m
-
-    Currencies with no 1M forward data have NaN in forward columns.
-    """
+    """Pivot long (date, currency_code, rate_type) to wide with spot and forward columns."""
     spot = long_df[long_df["rate_type"] == "spot"].copy()
     fwd  = long_df[long_df["rate_type"] == "fwd1m"].copy()
 
@@ -522,11 +464,6 @@ def pivot_to_panel(long_df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
 
     panel.sort_values(["date", "currency_code"], inplace=True)
     panel.reset_index(drop=True, inplace=True)
-
-    log.info(
-        "Wide panel: %d rows, %d currencies, columns: %s",
-        len(panel), panel["currency_code"].nunique(), list(panel.columns),
-    )
     return panel
 
 
@@ -543,7 +480,6 @@ def check_key_uniqueness(panel: pd.DataFrame, log: logging.Logger) -> None:
             dupes[["date", "currency_code"]].drop_duplicates().to_string(),
         )
         sys.exit(1)
-    log.info("GATE 7 PASS — panel keys (date, currency_code) are unique")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -575,10 +511,6 @@ def apply_msci_classification(panel: pd.DataFrame,
 
 def flag_and_exclude_pegs(panel: pd.DataFrame,
                           log: logging.Logger) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Separate rows for HKD, SAR, AED into an exclusions file.
-    Returns (main_panel, excluded_panel).
-    """
     mask     = panel["currency_code"].isin(PEGGED_CURRENCIES)
     excluded = panel[mask].copy()
     main     = panel[~mask].copy()
@@ -592,6 +524,87 @@ def flag_and_exclude_pegs(panel: pd.DataFrame,
         len(main), main["currency_code"].nunique(),
     )
     return main, excluded
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Forward coverage filter
+# ──────────────────────────────────────────────────────────────────────────────
+
+def filter_forward_coverage(panel: pd.DataFrame,
+                            log: logging.Logger) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Drop currencies with no forward_mid_1m data in the sample — they cannot
+    compute excess returns and must not appear in fx_panel_clean.csv.
+    Returns (retained_panel, spot_only_panel).
+    """
+    has_fwd  = panel.groupby("currency_code")["forward_mid_1m"].apply(
+        lambda s: s.notna().any()
+    )
+    keep_ccys = has_fwd[has_fwd].index
+    drop_ccys = has_fwd[~has_fwd].index
+
+    if not drop_ccys.empty:
+        log.info(
+            "Forward coverage filter: dropping %d spot-only currencies "
+            "(no forward_mid_1m in sample): %s",
+            len(drop_ccys), sorted(drop_ccys.tolist()),
+        )
+
+    retained  = panel[panel["currency_code"].isin(keep_ccys)].copy()
+    spot_only = panel[panel["currency_code"].isin(drop_ccys)].copy()
+
+    log.info(
+        "Panel after forward filter: %d rows, %d currencies with forward coverage",
+        len(retained), retained["currency_code"].nunique(),
+    )
+    return retained, spot_only
+
+
+def build_coverage_audit(
+    retained  : pd.DataFrame,
+    spot_only : pd.DataFrame,
+    excluded  : pd.DataFrame,
+    log       : logging.Logger,
+) -> pd.DataFrame:
+    """Per-currency coverage table: status, n_spot_months, n_forward_months."""
+    rows = []
+
+    for ccy, grp in retained.groupby("currency_code"):
+        rows.append({
+            "currency_code":    ccy,
+            "status":           "kept",
+            "n_spot_months":    int(grp["spot_mid"].notna().sum()),
+            "n_forward_months": int(grp["forward_mid_1m"].notna().sum()),
+        })
+
+    for ccy, grp in spot_only.groupby("currency_code"):
+        rows.append({
+            "currency_code":    ccy,
+            "status":           "spot_only_dropped",
+            "n_spot_months":    int(grp["spot_mid"].notna().sum()),
+            "n_forward_months": 0,
+        })
+
+    for ccy, grp in excluded.groupby("currency_code"):
+        rows.append({
+            "currency_code":    ccy,
+            "status":           "pegged_excluded",
+            "n_spot_months":    int(grp["spot_mid"].notna().sum()),
+            "n_forward_months": int(grp["forward_mid_1m"].notna().sum()),
+        })
+
+    audit = (
+        pd.DataFrame(rows)
+          .sort_values(["status", "currency_code"])
+          .reset_index(drop=True)
+    )
+    log.info(
+        "Coverage audit: %d kept, %d spot_only_dropped, %d pegged_excluded",
+        (audit["status"] == "kept").sum(),
+        (audit["status"] == "spot_only_dropped").sum(),
+        (audit["status"] == "pegged_excluded").sum(),
+    )
+    return audit
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -619,7 +632,6 @@ def add_log_fields(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
                 )
                 vals = vals.where(~bad, other=np.nan)
             panel[f"log_{col}"] = np.log(vals)
-    log.info("Log fields added for: %s", [c for c in rate_cols if c in panel.columns])
     return panel
 
 
@@ -629,7 +641,7 @@ def add_log_fields(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
 
 def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
     if panel.empty:
-        log.error("GATE 8 FAIL — main panel is empty after all filters")
+        log.error("Panel is empty after all filters")
         sys.exit(1)
 
     actual_start = panel["date"].min()
@@ -639,15 +651,11 @@ def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
     expected_last  = pd.Period(SAMPLE_END,   "M").to_timestamp("M")
 
     if actual_start > expected_first:
-        log.warning(
-            "GATE 8 WARNING — panel starts %s; expected on or before %s",
-            actual_start.date(), expected_first.date(),
-        )
+        log.warning("Panel starts %s; expected on or before %s",
+                    actual_start.date(), expected_first.date())
     if actual_end < expected_last:
-        log.warning(
-            "GATE 8 WARNING — panel ends %s; expected on or after %s",
-            actual_end.date(), expected_last.date(),
-        )
+        log.warning("Panel ends %s; expected on or after %s",
+                    actual_end.date(), expected_last.date())
 
     required_cols = [
         "date", "currency_code",
@@ -657,18 +665,20 @@ def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
     ]
     missing = [c for c in required_cols if c not in panel.columns]
     if missing:
-        log.error("GATE 9 FAIL — output missing required columns: %s", missing)
+        log.error("Output missing required columns: %s", missing)
         sys.exit(1)
 
     inf_count = int(np.isinf(panel.select_dtypes("number")).sum().sum())
     if inf_count:
-        log.warning(
-            "Found %d infinite values in numeric columns; check log transformations",
+        log.error(
+            "GATE 9 FAIL — %d infinite values in numeric columns after log transforms; "
+            "check for zero or negative source rates",
             inf_count,
         )
+        sys.exit(1)
 
     log.info(
-        "GATE 8/9 PASS — panel: %s to %s, %d rows, %d currencies",
+        "Panel: %s to %s, %d rows, %d currencies",
         actual_start.date(), actual_end.date(),
         len(panel), panel["currency_code"].nunique(),
     )
@@ -679,10 +689,6 @@ def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFrame:
-    """
-    Load ff_factors.csv, standardise column names, normalise dates to
-    month-end, retain {mktrf, smb, hml, umd, rf}, filter to sample window.
-    """
     df = pd.read_csv(path)
     df.rename(columns=col_map, inplace=True)
     df.columns = [_short_name(c) for c in df.columns]
@@ -711,13 +717,10 @@ def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
     df.reset_index(drop=True, inplace=True)
 
     if df["date"].duplicated().any():
-        log.error("FACTOR GATE FAIL — duplicate dates in ff_factors.csv after cleaning")
+        log.error("Duplicate dates in ff_factors.csv after cleaning")
         sys.exit(1)
 
-    log.info(
-        "FACTOR GATE PASS — factors: %d months, columns: %s",
-        len(df), list(df.columns),
-    )
+    log.info("Factors: %d months, columns: %s", len(df), list(df.columns))
     return df
 
 
@@ -727,8 +730,10 @@ def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
 
 def export_outputs(
     panel     : pd.DataFrame,
+    spot_only : pd.DataFrame,
     excluded  : pd.DataFrame,
     factors   : pd.DataFrame,
+    audit     : pd.DataFrame,
     schemas   : dict,
     spot_map  : dict,
     fwd_map   : dict,
@@ -737,13 +742,19 @@ def export_outputs(
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     panel.to_csv(OUTPUT_DIR / "fx_panel_clean.csv", index=False)
-    log.info("fx_panel_clean.csv:   %d rows", len(panel))
+    log.info(
+        "fx_panel_clean.csv:   %d rows, %d currencies",
+        len(panel), panel["currency_code"].nunique(),
+    )
 
     excluded.to_csv(OUTPUT_DIR / "excluded_pegged.csv", index=False)
     log.info("excluded_pegged.csv:  %d rows", len(excluded))
 
     factors.to_csv(OUTPUT_DIR / "ff_factors_clean.csv", index=False)
     log.info("ff_factors_clean.csv: %d rows", len(factors))
+
+    audit.to_csv(OUTPUT_DIR / "coverage_audit.csv", index=False)
+    log.info("coverage_audit.csv:   %d currencies", len(audit))
 
     schemas_serial = {}
     for name, s in schemas.items():
@@ -755,147 +766,6 @@ def export_outputs(
         json.dump(schemas_serial, f, indent=2)
     log.info("schema_mappings.json: written")
 
-    _write_metadata_notes(panel, excluded, factors, spot_map, fwd_map)
-    log.info("metadata_notes.txt:   written")
-
-
-def _write_metadata_notes(
-    panel    : pd.DataFrame,
-    excluded : pd.DataFrame,
-    factors  : pd.DataFrame,
-    spot_map : dict,
-    fwd_map  : dict,
-) -> None:
-    both      = sorted(set(spot_map) & set(fwd_map))
-    spot_only = sorted(set(spot_map) - set(fwd_map))
-    ts        = datetime.now().isoformat(timespec="seconds")
-
-    ccy_list = sorted(panel["currency_code"].unique())
-    dm_ccys  = sorted(c for c in ccy_list if c in MSCI_DM)
-    em_ccys  = sorted(c for c in ccy_list if c in MSCI_EM)
-    unc_ccys = sorted(c for c in ccy_list if c not in MSCI_DM and c not in MSCI_EM)
-
-    lines = [
-        "=" * 72,
-        "CURRENCY MOMENTUM PROJECT -- DATA CLEANING METADATA NOTES",
-        f"Generated: {ts}",
-        "=" * 72,
-        "",
-        "SOURCE FILES",
-        "  FX_SPOT_Rates_USD.csv  LSEG Datastream daily spot rates, USD-base (WRDS)",
-        "  FX_1MFD_Rates_USD.csv  1M forward rates, USD-base (WRDS)",
-        "  FX_1MFD_Rates_AUD.csv  1M forward rates, AUD-base (USD/AUD convention)",
-        "  FX_1MFD_Rates_EUR.csv  1M forward rates, EUR-base (USD/EUR convention)",
-        "  FX_1MFD_Rates_GBP.csv  1M forward rates, GBP-base (USD/GBP convention)",
-        "  FX_1MFD_Rates_NZD.csv  1M forward rates, NZD-base (USD/NZD convention)",
-        "  FX_metadata_USD.csv    Instrument code mappings for USD-base contracts",
-        "  FX_metadata_AUD/EUR/GBP/NZD.csv  Mappings for non-USD-base contracts",
-        "  ff_factors.csv         Fama-French + Carhart monthly factors",
-        "",
-        "WHY FILES ARE SPLIT",
-        "  Spot and 1MFD rates were separated at WRDS query time to avoid loading",
-        "  ~3.6M rows in a single file. AUD, EUR, GBP, NZD 1MFD contracts were",
-        "  unavailable as USD-base series in the original WRDS pull; they were",
-        "  retrieved as CCY-base contracts from a second WRDS query.",
-        "",
-        "QUOTE CONVENTION",
-        "  All rates in the final panel are expressed as foreign currency per 1 USD",
-        "  (the foreign/USD convention required by MSSS 2012).",
-        "  USD-base files: rates already in foreign/USD (no inversion needed).",
-        "  Non-USD-base files: rates in USD/CCY (USD per 1 unit of foreign);",
-        "  inverted to foreign/USD using the no-arbitrage rule below.",
-        "  Datastream field 'offerrate' is renamed to 'askrate' for clarity.",
-        "",
-        "NON-USD FORWARD RATE INVERSION (AUD, EUR, GBP, NZD)",
-        "  The four CCY-base 1MFD files store rates as USD/CCY = USD per 1 CCY.",
-        "  Inversion to CCY/USD = CCY per 1 USD applies the triangular no-arbitrage",
-        "  condition:  f^{CCY/USD} = 1 / f^{USD/CCY}",
-        "  Bid/ask are swapped on inversion to preserve the effective spread:",
-        "    new_bid = 1 / old_ask   (tighter side: fewer CCY per USD)",
-        "    new_ask = 1 / old_bid   (wider side: more CCY per USD)",
-        "  Assumption: triangular no-arbitrage holds. Any residual CIP deviations",
-        "  (transaction costs, capital controls) make this an approximation; in",
-        "  practice the deviation is negligible for liquid DM currencies.",
-        "",
-        "MONTH-END RULE",
-        "  For each (instrument_code, calendar_month), the last observed trading",
-        "  day is selected from the daily data.  The 'date' column in the output",
-        "  is set to the last calendar day of the month (e.g. 2000-01-31) to align",
-        "  with the Fama-French factor file.  A 2-month buffer before Jan 2000 is",
-        "  included so that returns for the first sample month can be computed from",
-        "  Dec 1999 spot.",
-        "",
-        "INSTRUMENT IDENTIFICATION",
-        f"  Spot (SPOT, USD-base):            {len(spot_map)} currencies",
-        f"  1M Forward (1MFD, all sources):   {len(fwd_map)} currencies",
-        f"  Both spot + 1M forward ({len(both)}): {both}",
-        f"  Spot-only, no 1M forward ({len(spot_only)}): {spot_only}",
-        "  Note: currencies without 1M forward data cannot be used to compute",
-        "  excess returns (rx = f_t - s_{t+1}) and will be excluded by returns.py.",
-        "  Note: CNH offshore RMB uses ratetypecode 'OS1M' (not '1MFD') and is",
-        "  therefore not included in the forward map. CNY (mainland) has a",
-        "  standard 1MFD series.",
-        "",
-        "MID-QUOTE DERIVATION",
-        "  Where 'midrate' is NaN but 'bidrate' and 'askrate' are both present,",
-        "  mid = (bid + ask) / 2.  Flagged in 'mid_derived' (column dropped in",
-        "  final output; rule documented here).",
-        "",
-        "MSCI CLASSIFICATION (static as of December 2024)",
-        "  Source: MSCI Market Classification Review, December 2024.",
-        f"  DM in panel  ({len(dm_ccys)}): {dm_ccys}",
-        f"  EM in panel  ({len(em_ccys)}): {em_ccys}",
-        f"  Unclassified ({len(unc_ccys)}): {unc_ccys}",
-        "  Unclassified = Frontier, Standalone, or no MSCI coverage.",
-        "",
-        "PEGGED CURRENCY EXCLUSIONS",
-        "  Excluded: HKD (USD peg), SAR (USD peg), AED (USD peg).",
-        f"  Rows removed: {len(excluded)}",
-        "  Written to excluded_pegged.csv for reference (Appendix Table A1).",
-        "",
-        "SAMPLE WINDOW",
-        f"  Target  : {SAMPLE_START.date()} to {SAMPLE_END.date()}",
-        f"  Actual  : {panel['date'].min().date()} to {panel['date'].max().date()}",
-        f"  Months  : {panel['date'].nunique()}",
-        "",
-        "OUTPUT SCHEMA (fx_panel_clean.csv)",
-        "  date              month-end timestamp (last calendar day)",
-        "  currency_code     ISO 4217 code (from metadata fromcurrcode)",
-        "  spot_mid          spot mid rate, foreign/USD, level",
-        "  spot_bid          spot bid rate, foreign/USD, level (NaN if absent)",
-        "  spot_ask          spot ask rate, foreign/USD, level (NaN if absent)",
-        "  forward_mid_1m    1M forward mid, NaN if no 1MFD data",
-        "  forward_bid_1m    1M forward bid, NaN if absent",
-        "  forward_ask_1m    1M forward ask, NaN if absent",
-        "  msci_class        'DM', 'EM', or NaN",
-        "  log_spot_mid      np.log(spot_mid)",
-        "  log_spot_bid      np.log(spot_bid)",
-        "  log_spot_ask      np.log(spot_ask)",
-        "  log_forward_mid_1m  np.log(forward_mid_1m)",
-        "  log_forward_bid_1m  np.log(forward_bid_1m)",
-        "  log_forward_ask_1m  np.log(forward_ask_1m)",
-        "",
-        "ROW COUNTS",
-        f"  Main panel      : {len(panel):,} rows",
-        f"  Excluded (pegs) : {len(excluded):,} rows",
-        f"  Factor file     : {len(factors):,} months",
-        "",
-        "VALIDATION GATES",
-        "  Gate 1  File availability          PASS",
-        "  Gate 2  Schema mapping             PASS",
-        "  Gate 3  Join key (exrateintcode)   PASS",
-        "  Gate 4  Instrument identification  PASS",
-        "  Gate 5  Quote orientation          PASS",
-        "  Gate 6  Month-end integrity        PASS",
-        "  Gate 7  Key uniqueness             PASS",
-        "  Gate 8  Sample window              PASS",
-        "  Gate 9  Final schema               PASS",
-        "  Factor  Factor schema              PASS",
-        "=" * 72,
-    ]
-
-    with open(OUTPUT_DIR / "metadata_notes.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -903,21 +773,9 @@ def _write_metadata_notes(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def clean_data() -> dict:
-    """
-    Run the full data cleaning pipeline end-to-end.
-
-    Returns
-    -------
-    dict with keys:
-        'panel'    -- cleaned monthly FX panel (pd.DataFrame)
-        'excluded' -- excluded pegged-currency rows (pd.DataFrame)
-        'factors'  -- cleaned Fama-French / Carhart factors (pd.DataFrame)
-    """
+    """Run the full data cleaning pipeline; return {'panel', 'excluded', 'factors'}."""
     log = setup_logging()
-    log.info("=" * 60)
-    log.info("Currency Momentum -- Data Cleaning Pipeline")
-    log.info("Start: %s", datetime.now().isoformat(timespec="seconds"))
-    log.info("=" * 60)
+    log.info("Data cleaning pipeline starting")
 
     # ── Gate 1: file availability ──
     resolve_inputs(INPUT_PATHS, log)
@@ -932,14 +790,12 @@ def clean_data() -> dict:
 
     # ── Spot rates (chunked, USD-base) ──
     spot_codes = {int(c) for c in spot_map.values()}
-    log.info("Scanning FX_SPOT_Rates_USD.csv for %d spot codes ...", len(spot_codes))
     raw_spot = load_fx_chunked(
         INPUT_PATHS["fx_spot_usd"], col_maps["fx_spot_usd"], spot_codes, log,
     )
 
     # ── USD-base 1M forward rates (chunked) ──
     fwd_usd_codes = {int(c) for c in fwd_usd_map.values()}
-    log.info("Scanning FX_1MFD_Rates_USD.csv for %d forward codes ...", len(fwd_usd_codes))
     raw_fwd_usd = load_fx_chunked(
         INPUT_PATHS["fx_fwd_usd"], col_maps["fx_fwd_usd"], fwd_usd_codes, log,
     )
@@ -1018,6 +874,12 @@ def clean_data() -> dict:
     # ── Pegged currency exclusion ──
     panel, excluded = flag_and_exclude_pegs(panel, log)
 
+    # ── Forward coverage filter (drop spot-only currencies) ──
+    panel, spot_only = filter_forward_coverage(panel, log)
+
+    # ── Coverage audit ──
+    audit = build_coverage_audit(panel, spot_only, excluded, log)
+
     # ── Log-price fields ──
     panel = add_log_fields(panel, log)
 
@@ -1031,12 +893,9 @@ def clean_data() -> dict:
     fwd_all_map = {**fwd_usd_map, **{v: k for k, v in non_usd_code_map.items()}}
 
     # ── Export all outputs ──
-    export_outputs(panel, excluded, factors, schemas, spot_map, fwd_all_map, log)
+    export_outputs(panel, spot_only, excluded, factors, audit, schemas, spot_map, fwd_all_map, log)
 
-    log.info("=" * 60)
-    log.info("Pipeline complete: %s", datetime.now().isoformat(timespec="seconds"))
-    log.info("=" * 60)
-
+    log.info("Data cleaning pipeline complete")
     return {"panel": panel, "excluded": excluded, "factors": factors}
 
 

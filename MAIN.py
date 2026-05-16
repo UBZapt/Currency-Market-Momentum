@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""
+MAIN.py — Currency Momentum Project master script.
+
+Orchestrates the full pipeline from data cleaning through all empirical steps.
+Each section maps to Methodology_Detailed.md.
+
+Usage:
+    python MAIN.py               # run full pipeline
+    python MAIN.py --skip-data   # skip data cleaning (use cached panel)
+"""
+
+import sys
+import argparse
+import logging
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR   = PROJECT_ROOT / "output"
+LOG_DIR      = PROJECT_ROOT / "logs"
+
+PANEL_PATH   = OUTPUT_DIR / "fx_panel_clean.csv"
+
+
+def get_logger() -> logging.Logger:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fmt = "%(asctime)s  %(levelname)-7s  %(message)s"
+    logging.basicConfig(
+        level    = logging.INFO,
+        format   = fmt,
+        handlers = [
+            logging.FileHandler(LOG_DIR / f"main_{ts}.log", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+    return logging.getLogger("main")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Currency Momentum Pipeline")
+    parser.add_argument(
+        "--skip-data",
+        action="store_true",
+        help="Skip data cleaning and use cached fx_panel_clean.csv",
+    )
+    args = parser.parse_args()
+
+    log = get_logger()
+    log.info("=" * 60)
+    log.info("Currency Momentum -- Master Pipeline")
+    log.info("=" * 60)
+
+    # ── §1: Data cleaning ──────────────────────────────────────────────────────
+    if args.skip_data:
+        if not PANEL_PATH.exists():
+            log.error("--skip-data requested but %s not found. Run without flag.", PANEL_PATH)
+            sys.exit(1)
+        log.info("§1 Data cleaning: skipped (cached panel found at %s)", PANEL_PATH.name)
+        from src.data import clean_data
+        data_result = {"panel": None, "excluded": None, "factors": None}
+    else:
+        log.info("§1 Data cleaning: starting ...")
+        from src.data import clean_data
+        data_result = clean_data()
+        log.info("§1 Data cleaning: complete")
+
+    # ── §2: Returns and RX benchmark ──────────────────────────────────────────
+    log.info("§2 Compute returns + RX index: starting ...")
+    from src.returns import compute_all_returns
+    returns_result = compute_all_returns(panel=data_result.get("panel"))
+    log.info("§2 Returns: complete")
+
+    # ── Future sections (signals, portfolios, regressions ...) will go here ──
+
+    log.info("=" * 60)
+    log.info("Pipeline complete.")
+    log.info("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
