@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific exclusions (CLAUDE.md §.gitignore)
+CLAUDE.md
+Methodology_Detailed.md
+
+# Large raw data files (not version-controlled)
+FX_SPOT_Rates_USD.csv
+FX_1MFD_Rates_*.csv
+FX_metadata_*.csv
+ff_factors.csv
+
+# Generated outputs and logs
+output/
+logs/
+.claude/ 
