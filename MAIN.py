@@ -93,7 +93,17 @@ def main() -> None:
         sys.exit(1)
     log.info("§4 Portfolio machinery: validated")
 
-    # ── Future sections (§5 onward) will go here ─────────────────────────────
+    # ── §5: Formation-Holding Grid + Section 5 outputs ───────────────────────
+    log.info("§5 Formation-Holding Grid + outputs: starting ...")
+    from src.section5 import run_section5
+    section5_result = run_section5(
+        returns_panel=returns_result["returns_panel"],
+        rx_factor=returns_result["rx_factor"],
+    )
+    log.info("§5 complete.")
+
+    # ── Future sections (§6 onward) will go here ──────────────────────────────
+    # section5_result["grid_A"] and ["grid_B"] are available for §6 net-return logic.
 
     log.info("=" * 60)
     log.info("Pipeline complete.")

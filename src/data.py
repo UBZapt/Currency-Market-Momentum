@@ -199,7 +199,14 @@ def map_instruments(meta: pd.DataFrame,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_fx_chunked(path: Path, col_map: dict, relevant_codes: set,
-                    log: logging.Logger) -> pd.DataFrame:
+                    date_format: str, log: logging.Logger) -> pd.DataFrame:
+    """
+    Stream-load a large FX rate CSV and keep rows whose exrateintcode is in `relevant_codes`.
+    date_format is the explicit pandas format string for exratedate (e.g. 'ISO8601',
+    '%d/%m/%Y'). Each input file has a deterministic date format — never pass
+    dayfirst=True, because that mis-parses ISO 'YYYY-MM-DD' as '%Y-%d-%m' and silently
+    swaps month/day or drops rows.
+    """
     codes = {int(c) for c in relevant_codes}
 
     chunks        = []
@@ -215,6 +222,9 @@ def load_fx_chunked(path: Path, col_map: dict, relevant_codes: set,
         filtered = chunk[chunk["exrateintcode"].isin(codes)].copy()
 
         if not filtered.empty:
+            filtered["exratedate"] = pd.to_datetime(
+                filtered["exratedate"], format=date_format, errors="coerce"
+            )
             total_kept += len(filtered)
             chunks.append(filtered)
 
@@ -281,6 +291,11 @@ def load_and_invert_non_usd_fwd(
     if df.empty:
         log.error("No rows with code %d in %s", code, rates_path.name)
         sys.exit(1)
+
+    # Non-USD-base 1MFD files are DMY-formatted ('03/01/2000'); never use dayfirst.
+    df["exratedate"] = pd.to_datetime(
+        df["exratedate"], format="%d/%m/%Y", errors="coerce"
+    )
 
     # Invert: CCY/USD -> foreign/USD
     old_bid = df["bidrate"].copy()
@@ -366,10 +381,16 @@ def aggregate_to_month_end(df: pd.DataFrame, log: logging.Logger) -> pd.DataFram
     Select the last observed trading day per (instrument, month).
     Output 'date' = last calendar day of month (aligns with FF factors).
     2-month pre-sample buffer retained for first-month return computation.
-    dayfirst=True handles both ISO and DD/MM/YYYY formats.
+
+    Caller is responsible for ensuring `exratedate` is already datetime64. Each
+    source file uses a deterministic format and is parsed by its loader; a single
+    blanket `dayfirst=True` here mis-handles ISO dates by locking the column to
+    '%Y-%d-%m', which swaps day/month for days 1-12 and drops days 13-31.
     """
     df = df.copy()
-    df["exratedate"] = pd.to_datetime(df["exratedate"], dayfirst=True, errors="coerce")
+    if not pd.api.types.is_datetime64_any_dtype(df["exratedate"]):
+        log.error("aggregate_to_month_end: exratedate not parsed by loader")
+        sys.exit(1)
     df = df.dropna(subset=["exratedate"])
 
     buf_start = SAMPLE_START - pd.DateOffset(months=2)
@@ -699,7 +720,8 @@ def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
         sys.exit(1)
     date_col = date_candidates[0]
 
-    df["date"] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
+    # ff_factors.csv stores dates as DD/MM/YYYY ('31/01/2000').
+    df["date"] = pd.to_datetime(df[date_col], format="%d/%m/%Y", errors="coerce")
     df = df.dropna(subset=["date"])
 
     df["date"] = df["date"].dt.to_period("M").dt.to_timestamp("M")
@@ -789,15 +811,19 @@ def clean_data() -> dict:
     spot_map, fwd_usd_map   = map_instruments(meta_usd, log)
 
     # ── Spot rates (chunked, USD-base) ──
+    # FX_SPOT_Rates_USD.csv stores dates as ISO YYYY-MM-DD.
     spot_codes = {int(c) for c in spot_map.values()}
     raw_spot = load_fx_chunked(
-        INPUT_PATHS["fx_spot_usd"], col_maps["fx_spot_usd"], spot_codes, log,
+        INPUT_PATHS["fx_spot_usd"], col_maps["fx_spot_usd"], spot_codes,
+        "ISO8601", log,
     )
 
     # ── USD-base 1M forward rates (chunked) ──
+    # FX_1MFD_Rates_USD.csv stores dates as DD/MM/YYYY.
     fwd_usd_codes = {int(c) for c in fwd_usd_map.values()}
     raw_fwd_usd = load_fx_chunked(
-        INPUT_PATHS["fx_fwd_usd"], col_maps["fx_fwd_usd"], fwd_usd_codes, log,
+        INPUT_PATHS["fx_fwd_usd"], col_maps["fx_fwd_usd"], fwd_usd_codes,
+        "%d/%m/%Y", log,
     )
 
     # ── Non-USD 1M forward rates (invert CCY/USD -> foreign/USD) ──

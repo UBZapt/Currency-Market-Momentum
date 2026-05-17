@@ -133,6 +133,26 @@ def validate_returns(
         sys.exit(1)
     log.info("SANITY PASS — spot_change restricted to forward-rate universe")
 
+    # Magnitude gate: a 1M log forward discount above ~0.20 implies spot/forward
+    # are mis-aligned (different real dates, wrong units, etc.). EM crisis episodes
+    # (TRY May 2023, RUB 2022Q1) legitimately reach ~0.10; 0.20 leaves slack while
+    # still catching the date-parse bug class (>0.30).
+    FD_THRESHOLD = 0.20
+    fd_abs_max = float(returns_panel["forward_discount"].abs().max())
+    if fd_abs_max > FD_THRESHOLD:
+        bad = returns_panel.loc[
+            returns_panel["forward_discount"].abs() > FD_THRESHOLD,
+            ["date", "currency_code", "forward_discount"],
+        ].sort_values("forward_discount", key=abs, ascending=False)
+        log.error(
+            "SANITY FAIL — |forward_discount| max = %.4f exceeds %.2f; "
+            "%d offending rows. First few:\n%s",
+            fd_abs_max, FD_THRESHOLD, len(bad), bad.head(10).to_string(index=False),
+        )
+        sys.exit(1)
+    log.info("SANITY PASS — |forward_discount| max = %.4f (< %.2f)",
+             fd_abs_max, FD_THRESHOLD)
+
 
 def validate_quote_coverage(returns_panel: pd.DataFrame, log: logging.Logger) -> None:
     """Warn on missing bid/ask primitives for cost-eligible rows (§6.x assertion 5)."""
