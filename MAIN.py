@@ -102,8 +102,15 @@ def main() -> None:
     )
     log.info("§5 complete.")
 
-    # ── Future sections (§6 onward) will go here ──────────────────────────────
-    # section5_result["grid_A"] and ["grid_B"] are available for §6 net-return logic.
+    # ── §6: Transaction-cost-adjusted momentum returns ────────────────────────
+    log.info("§6 Transaction costs: starting ...")
+    from src.section6 import run_section6
+    section6_result = run_section6(
+        returns_panel=returns_result["returns_panel"],
+        section5_result=section5_result,
+    )
+    _ = section6_result  # available for §7 onward
+    log.info("§6 complete.")
 
     log.info("=" * 60)
     log.info("Pipeline complete.")
