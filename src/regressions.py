@@ -148,7 +148,10 @@ def _run_reversal_one_f(lagged: pd.DataFrame, f: int, log: logging.Logger) -> di
 
 def _export_outputs(table1: pd.DataFrame, decision: dict, log: logging.Logger) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    table1.to_csv(OUTPUT_DIR / "table1_reversal.csv", index=False)
+    out = table1.copy()
+    for col in ("p_ols", "p_nw_andrews", "p_nw_12"):
+        out[col] = out[col].round(3)
+    out.to_csv(OUTPUT_DIR / "table1_reversal.csv", index=False)
     with open(OUTPUT_DIR / "skip_month_decision.json", "w") as fh:
         json.dump(decision, fh, indent=2)
     log.info(
@@ -245,14 +248,14 @@ def print_reversal_table(result: dict) -> None:
     print("-" * W)
     for _, row in t1.iterrows():
         print(
-            f"{int(row['f']):>4}  {row['p_ols']:>10.3e}  "
-            f"{row['p_nw_andrews']:>10.3e}  {row['p_nw_12']:>10.3e}"
+            f"{int(row['f']):>4}  {row['p_ols']:>10.3f}  "
+            f"{row['p_nw_andrews']:>10.3f}  {row['p_nw_12']:>10.3f}"
         )
     print("=" * W)
     print(
         f"Decision (basis: f={d['basis_f']}, NW-Andrews L={d['nw_lag_andrews']}, two-tailed 5%): "
         f"beta1_mean={d['beta1_mean']:+.4f}, t={d['t_stat_nw_andrews']:+.4f}, "
-        f"p={d['p_value_nw_andrews']:.3e}  =>  skip_month_flag={result['skip_month_flag']}"
+        f"p={d['p_value_nw_andrews']:.3f}  =>  skip_month_flag={result['skip_month_flag']}"
     )
     print("=" * W)
 

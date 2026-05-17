@@ -103,7 +103,9 @@ def _std_tstat(series) -> float:
 
 def _export_fxh_wide(grid_dict: dict, signal_type: str, signal_label: str) -> None:
     """
-    Wide-format CSV: three stacked blocks — mean × 100, NW t-statistic, p-value (3dp).
+    Wide-format CSV: three stacked blocks — annualised mean × 100 (=monthly mean × 1200
+    since log returns scale linearly), NW t-statistic, p-value (3dp).
+    t-stats and p-values are scale-invariant under linear annualisation.
     """
     col_label = "Row"
     h_cols    = [f"h={h}" for h in H_GRID]
@@ -121,7 +123,7 @@ def _export_fxh_wide(grid_dict: dict, signal_type: str, signal_label: str) -> No
                 mr[f"h={h}"] = nr[f"h={h}"] = sr[f"h={h}"] = pr[f"h={h}"] = ""
             else:
                 s = _nw_stats(series.values)
-                mr[f"h={h}"] = round(s["mean"] * 100, 3)
+                mr[f"h={h}"] = round(s["mean"] * 1200, 3)
                 nr[f"h={h}"] = round(s["t"], 3)
                 sr[f"h={h}"] = round(_std_tstat(series.values), 3)
                 pr[f"h={h}"] = round(s["p"], 3)
@@ -135,7 +137,7 @@ def _export_fxh_wide(grid_dict: dict, signal_type: str, signal_label: str) -> No
 
     spacer = {c: "" for c in all_cols}
     rows = (
-        [hdr(f"Signal {signal_type} — {signal_label}: Mean return (× 100)")]
+        [hdr(f"Signal {signal_type} — {signal_label}: Annualised mean return (× 100)")]
         + mean_rows
         + [spacer, hdr("NW HAC t-statistic")]
         + nw_rows
@@ -157,8 +159,8 @@ def _print_fxh_table(grid_dict: dict, signal_type: str, signal_label: str) -> No
     print()
     print("=" * W)
     print(f"  §5 f×h Momentum Grid — Signal {signal_type}: {signal_label}")
-    print(f"  Mean monthly log excess return × 100  |  [NW HAC t-stat]  (Standard t-stat)")
-    print(f"  ***p<.01 **p<.05 *p<.10 (stars based on NW HAC)")
+    print(f"  Annualised log excess return × 100  |  [NW HAC t-stat]  (Standard t-stat)")
+    print(f"  ***p<.01 **p<.05 *p<.10 (stars based on NW HAC; t-stats are scale-invariant)")
     print("=" * W)
     header = f"  {'f \\ h':<6}" + "".join(f"{'h='+str(h):>{col_w}}" for h in H_GRID)
     print(header)
@@ -178,7 +180,7 @@ def _print_fxh_table(grid_dict: dict, signal_type: str, signal_label: str) -> No
                 st    = _std_tstat(series.values)
                 nw_str  = f"[{s['t']:.2f}]{_sig_stars(s['p'])}"
                 std_str = f"({st:.2f})"
-                mean_line += f"{s['mean']*100:>{col_w}.2f}"
+                mean_line += f"{s['mean']*1200:>{col_w}.2f}"
                 nw_line   += f"{nw_str:>{col_w}}"
                 std_line  += f"{std_str:>{col_w}}"
         print(mean_line)
@@ -509,19 +511,20 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
             "ols_T":    ols_stats["T"],    "ols_nw_lag": ols_stats["nw_lag"],
         })
 
-    # Wide-format CSV matching terminal layout
+    # Wide-format CSV matching terminal layout. Means annualised (× 12).
+    # t-stats and p-values are scale-invariant under linear annualisation.
     csv_rows = []
     for r in records:
         csv_rows.append({
-            "f":                r["f"],
-            "EW mean × 100":   round(r["ew_mean"] * 100, 3),
-            "EW t-stat":        round(r["ew_t"], 3),
-            "EW p-value":       round(r["ew_p"], 3),
-            "OLS mean × 100":  round(r["ols_mean"] * 100, 3),
-            "OLS t-stat":       round(r["ols_t"], 3),
-            "OLS p-value":      round(r["ols_p"], 3),
-            "T(EW)":            r["ew_T"],
-            "T(OLS)":           r["ols_T"],
+            "f":                       r["f"],
+            "EW annualised mean × 100": round(r["ew_mean"] * 1200, 3),
+            "EW t-stat":                round(r["ew_t"], 3),
+            "EW p-value":               round(r["ew_p"], 3),
+            "OLS annualised mean × 100": round(r["ols_mean"] * 1200, 3),
+            "OLS t-stat":               round(r["ols_t"], 3),
+            "OLS p-value":              round(r["ols_p"], 3),
+            "T(EW)":                    r["ew_T"],
+            "T(OLS)":                   r["ols_T"],
         })
     pd.DataFrame(csv_rows).to_csv(OUTPUT_DIR / "table_ols_comparison.csv", index=False)
 
@@ -530,7 +533,7 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
     print()
     print("=" * W)
     print("  §5.4 Rolling-OLS vs Equal-Weighted Signal (h=1)")
-    print("  Mean monthly log excess return × 100  |  [NW t-stat]  ***p<.01 **p<.05 *p<.10")
+    print("  Annualised log excess return × 100  |  [NW t-stat]  ***p<.01 **p<.05 *p<.10")
     print("=" * W)
     print(
         f"  {'f':<5}"
@@ -544,9 +547,9 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
         ols_t_str = f"[{row['ols_t']:.2f}]{_sig_stars(row['ols_p'])}"
         print(
             f"  {row['f']:<5}"
-            f"{row['ew_mean']*100:>9.2f}{ew_t_str:>13}"
+            f"{row['ew_mean']*1200:>9.2f}{ew_t_str:>13}"
             f"{row['ew_p']:>8.3f}"
-            f"{row['ols_mean']*100:>11.2f}{ols_t_str:>13}"
+            f"{row['ols_mean']*1200:>11.2f}{ols_t_str:>13}"
             f"{row['ols_p']:>8.3f}"
             f"{row['ew_T']:>8}{row['ols_T']:>8}"
         )
