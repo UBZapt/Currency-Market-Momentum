@@ -82,7 +82,18 @@ def main() -> None:
     skip_month_flag = reversal_result["skip_month_flag"]
     log.info("§3 Short-term reversal: complete — skip_month_flag=%s", skip_month_flag)
 
-    # ── Future sections (signals, portfolios ...) will go here ────────────────
+    # ── §4: Portfolio machinery validation ───────────────────────────────────
+    log.info("§4 Portfolio machinery validation: starting ...")
+    from src.validate_section4 import run_section4_validation
+    section4_ok = run_section4_validation(
+        returns_panel=returns_result["returns_panel"],
+    )
+    if not section4_ok:
+        log.error("§4 validation failed — aborting")
+        sys.exit(1)
+    log.info("§4 Portfolio machinery: validated")
+
+    # ── Future sections (§5 onward) will go here ─────────────────────────────
 
     log.info("=" * 60)
     log.info("Pipeline complete.")
