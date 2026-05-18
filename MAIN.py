@@ -112,6 +112,16 @@ def main() -> None:
     _ = section6_result  # available for §7 onward
     log.info("§6 complete.")
 
+    # ── §7: Carry trade comparison + double sort ──────────────────────────────
+    log.info("§7 Carry trade + double sort: starting ...")
+    from src.section7 import run_section7
+    section7_result = run_section7(
+        returns_panel=returns_result["returns_panel"],
+        section5_result=section5_result,
+    )
+    _ = section7_result
+    log.info("§7 complete.")
+
     log.info("=" * 60)
     log.info("Pipeline complete.")
     log.info("=" * 60)
