@@ -119,8 +119,50 @@ def main() -> None:
         returns_panel=returns_result["returns_panel"],
         section5_result=section5_result,
     )
-    _ = section7_result
     log.info("§7 complete.")
+
+    # ── §8: Sharpe ratio grid (Signal A + CT carry) ──────────────────────────
+    log.info("§8 Sharpe ratio grid: starting ...")
+    from src.section8 import run_section8
+    section8_result = run_section8(
+        section5_result=section5_result,
+        section7_result=section7_result,
+    )
+    _ = section8_result
+    log.info("§8 complete.")
+
+    # ── §9.1: Fama-MacBeth cross-sectional regressions (Table 13) ────────────
+    # §9.2 (lag decomposition / Table 14) intentionally omitted — rolling OLS
+    # results in §5.4 were inconclusive, so the lag decomposition is not reported.
+    log.info("§9.1 Fama-MacBeth regressions: starting ...")
+    from src.section9 import run_section9
+    section9_result = run_section9(
+        returns_panel=returns_result["returns_panel"],
+    )
+    _ = section9_result
+    log.info("§9.1 complete.")
+
+    # ── §10: Factor regressions (Table 15) ────────────────────────────────────
+    log.info("§10 Factor regressions: starting ...")
+    from src.section10 import run_section10
+    section10_result = run_section10(
+        returns_panel=returns_result["returns_panel"],
+        factors=data_result.get("factors"),
+        section5_result=section5_result,
+        section7_result=section7_result,
+    )
+    _ = section10_result
+    log.info("§10 complete.")
+
+    # ── §11.2: Volatility-scaled (TSMOM) f×h grid (Appendix Table A3) ────────
+    # §11.1, §11.3, §11.4 intentionally omitted — only §11.2 implemented.
+    log.info("§11.2 TSMOM f×h grid: starting ...")
+    from src.section11 import run_section11
+    section11_result = run_section11(
+        returns_panel=returns_result["returns_panel"],
+    )
+    _ = section11_result
+    log.info("§11.2 complete.")
 
     log.info("=" * 60)
     log.info("Pipeline complete.")

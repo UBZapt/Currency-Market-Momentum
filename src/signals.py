@@ -96,6 +96,54 @@ def signal_spot_change(returns_panel: pd.DataFrame, f: int) -> pd.DataFrame:
     return out.merge(rx_avail, on=["date", "currency_code"], how="inner").reset_index(drop=True)
 
 
+def signal_volatility_scaled(
+    returns_panel: pd.DataFrame,
+    f: int,
+    sigma_window: int = 36,
+) -> pd.DataFrame:
+    """
+    TSMOM signal (§11.2, Moskowitz/Ooi/Pedersen 2012):
+
+        S_{i,t}^{TSMOM} = ( Σ_{j=0}^{f-1} rx_{i,t-j} ) / σ̂_{i,t}
+
+    where σ̂_{i,t} is the rolling `sigma_window`-month standard deviation of
+    rx_i ending at t (inclusive of t).  Period-merge based: σ is computed
+    only when all `sigma_window` consecutive months are present, so the
+    estimator never silently crosses currency-level data gaps.
+
+    Numerator follows the same no-skip convention as Signal A (§5.1).
+    """
+    _validate_panel(returns_panel, ["excess_return"])
+
+    # Numerator: f-month cumulative excess return ending at t
+    num = (
+        _rolling_sum_signal(returns_panel, "excess_return", f)
+        .rename(columns={"signal": "_num"})
+    )
+
+    # Denominator: rolling sigma_window-month std (period-merge for consecutive months)
+    lp     = _build_lag_panel(returns_panel, "excess_return", sigma_window - 1)
+    rx_cols = ["excess_return"] + [f"lag_{k}" for k in range(1, sigma_window)]
+    lp     = lp.dropna(subset=rx_cols)
+    if lp.empty:
+        raise ValueError(
+            f"signal_volatility_scaled: no rows with {sigma_window} consecutive months of rx"
+        )
+    sigma_df = lp[["date", "currency_code"]].copy()
+    sigma_df["sigma"] = lp[rx_cols].std(axis=1, ddof=1)
+    sigma_df = sigma_df[sigma_df["sigma"] > 0]
+
+    merged = num.merge(sigma_df, on=["date", "currency_code"], how="inner")
+    merged["signal"] = merged["_num"] / merged["sigma"]
+
+    return (
+        merged[["date", "currency_code", "signal"]]
+        .dropna(subset=["signal"])
+        .sort_values(["date", "currency_code"])
+        .reset_index(drop=True)
+    )
+
+
 def signal_rolling_ols(
     returns_panel: pd.DataFrame,
     f: int,
@@ -166,12 +214,12 @@ def build_signal(
     signal_type: str = "A",
 ) -> pd.DataFrame:
     """
-    Dispatcher. signal_type: 'A' | 'B' | 'OLS'.
+    Dispatcher. signal_type: 'A' | 'B' | 'OLS' | 'TSMOM'.
     Returns (date, currency_code, signal).
-    The OLS rolling window is internal to signal_rolling_ols (methodology §5.4);
-    callers of build_signal cannot supply it, which prevents a stray
-    initial_window from silently propagating to Signal A or B (where it is
-    irrelevant — those signals only have an f-1 lookback burn-in).
+    Internal windows (OLS initial_window=36, TSMOM sigma_window=36) are set
+    inside the respective signal functions per methodology §5.4 / §11.2;
+    callers cannot supply them, which prevents stray windows from silently
+    propagating to Signal A or B (where they are irrelevant).
     """
     if signal_type == "A":
         return signal_excess_return(returns_panel, f)
@@ -179,7 +227,11 @@ def build_signal(
         return signal_spot_change(returns_panel, f)
     if signal_type == "OLS":
         return signal_rolling_ols(returns_panel, f)
-    raise ValueError(f"Unknown signal_type '{signal_type}'. Use 'A', 'B', or 'OLS'.")
+    if signal_type == "TSMOM":
+        return signal_volatility_scaled(returns_panel, f)
+    raise ValueError(
+        f"Unknown signal_type '{signal_type}'. Use 'A', 'B', 'OLS', or 'TSMOM'."
+    )
 
 
 def _validate_panel(panel: pd.DataFrame, required_cols: list) -> None:
