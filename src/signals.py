@@ -164,18 +164,21 @@ def build_signal(
     returns_panel: pd.DataFrame,
     f: int,
     signal_type: str = "A",
-    initial_window: int = 36,
 ) -> pd.DataFrame:
     """
     Dispatcher. signal_type: 'A' | 'B' | 'OLS'.
     Returns (date, currency_code, signal).
+    The OLS rolling window is internal to signal_rolling_ols (methodology §5.4);
+    callers of build_signal cannot supply it, which prevents a stray
+    initial_window from silently propagating to Signal A or B (where it is
+    irrelevant — those signals only have an f-1 lookback burn-in).
     """
     if signal_type == "A":
         return signal_excess_return(returns_panel, f)
     if signal_type == "B":
         return signal_spot_change(returns_panel, f)
     if signal_type == "OLS":
-        return signal_rolling_ols(returns_panel, f, initial_window)
+        return signal_rolling_ols(returns_panel, f)
     raise ValueError(f"Unknown signal_type '{signal_type}'. Use 'A', 'B', or 'OLS'.")
 
 

@@ -241,13 +241,14 @@ def build_mom_pipeline(
     f: int,
     h: int,
     signal_type: str = "A",
-    initial_window: int = 36,
 ) -> pd.DataFrame:
     """
     Full pipeline: signal → assign → cohort returns → MOM series.
     Returns (date, mom_return, n_active_cohorts).
+    The OLS rolling window is set inside signal_rolling_ols (methodology §5.4);
+    it is not exposed here to keep Signal A/B free of any initial_window default.
     """
-    signal_df   = build_signal(returns_panel, f, signal_type, initial_window)
+    signal_df   = build_signal(returns_panel, f, signal_type)
     assignments = assign_portfolios(signal_df)
     cohort_rets = compute_cohort_returns(assignments, returns_panel, h)
     return compute_mom_series(cohort_rets, h)
@@ -258,14 +259,13 @@ def build_portfolio_pipeline(
     f: int,
     h: int,
     signal_type: str = "A",
-    initial_window: int = 36,
 ) -> pd.DataFrame:
     """
     Full pipeline: signal → assign → cohort returns → per-portfolio return series.
     Returns (date, portfolio, avg_return, n_active_cohorts,
              n_sextile_cohorts, n_quintile_cohorts).
     """
-    signal_df   = build_signal(returns_panel, f, signal_type, initial_window)
+    signal_df   = build_signal(returns_panel, f, signal_type)
     assignments = assign_portfolios(signal_df)
     cohort_rets = compute_cohort_returns(assignments, returns_panel, h)
     return compute_portfolio_series(cohort_rets, h)

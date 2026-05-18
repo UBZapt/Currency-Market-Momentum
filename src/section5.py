@@ -28,6 +28,7 @@ from src.signals    import build_signal
 from src.portfolios import (
     assign_portfolios,
     compute_cohort_returns,
+    compute_mom_series,
     compute_portfolio_series,
     build_mom_pipeline,
 )
@@ -177,12 +178,21 @@ def _print_fxh_table(stats_dict: dict, signal_type: str, signal_label: str) -> N
     print("=" * W)
 
 
-def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> dict:
+def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> tuple[dict, dict]:
     """
     Build 25 MOM series for one signal type using the dynamic sextile/quintile rule.
-    Returns dict {(f, h): pd.Series(index=date, data=mom_return)}.
+
+    Also caches per-portfolio return series for h=1 cells (used by §7.2
+    sextile-by-sextile correlations) so signal+assign+cohort work is not
+    duplicated downstream.
+
+    Returns
+    -------
+    (mom_grid, port_h1_grid):
+      mom_grid     : {(f, h): pd.Series(index=date, data=mom_return)}
+      port_h1_grid : {(f, 1): pd.DataFrame(date, portfolio, avg_return)} — dynamic sort
     Saves long-format internal CSV (fxh_series_{A/B}.csv) and wide-format display CSV.
-    signal_type: 'A' (excess return) or 'B' (spot change).
+    signal_type: 'A' (excess return) or 'B' (spot change). Neither uses any initial_window.
     """
     assert signal_type in ("A", "B"), f"signal_type must be 'A' or 'B', got '{signal_type}'"
     log          = _get_log()
@@ -191,11 +201,22 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> dict:
     data_start = returns_panel.dropna(subset=["excess_return"])["date"].min()
     records    = []
     grid_dict  = {}
+    port_h1    = {}
 
     for f in F_GRID:
+        # Build signal + assignments once per f and reuse across the h loop;
+        # this also lets us cache the h=1 cohort_rets for the per-portfolio cache.
+        try:
+            signal_df   = build_signal(returns_panel, f, signal_type)
+            assignments = assign_portfolios(signal_df)
+        except Exception as e:
+            log.warning("  SKIP f=%d signal=%s: %s", f, signal_type, e)
+            continue
+
         for h in H_GRID:
             try:
-                mom = build_mom_pipeline(returns_panel, f, h, signal_type)
+                cohort_rets = compute_cohort_returns(assignments, returns_panel, h)
+                mom         = compute_mom_series(cohort_rets, h)
             except Exception as e:
                 log.warning("  SKIP f=%d h=%d signal=%s: %s", f, h, signal_type, e)
                 continue
@@ -217,6 +238,15 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> dict:
             for date, val in series.items():
                 records.append({"date": date, "f": f, "h": h, "mom_return": val})
 
+            # Cache per-portfolio series for h=1 cells (used by §7 correlations).
+            if h == 1:
+                port_ser = compute_portfolio_series(cohort_rets, h)
+                port_h1[(f, h)] = (
+                    port_ser[port_ser["n_active_cohorts"] == h]
+                    [["date", "portfolio", "avg_return"]]
+                    .reset_index(drop=True)
+                )
+
     # Compute stats once per cell — shared by export and terminal display
     stats_dict = {
         key: _nw_stats(series.values)
@@ -231,7 +261,7 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> dict:
     _print_fxh_table(stats_dict, signal_type, signal_label)
 
     log.info("f×h grid (%s): %d cells computed", signal_type, len(grid_dict))
-    return grid_dict
+    return grid_dict, port_h1
 
 
 # ── Quintile-only presentation sort (for portfolio-return tables only) ─────────
@@ -484,7 +514,8 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
         ew_valid = ew_mom[ew_mom["n_active_cohorts"] == 1].dropna(subset=["mom_return"])
         ew_stats = _nw_stats(ew_valid["mom_return"].values)
 
-        ols_mom   = build_mom_pipeline(returns_panel, f, 1, "OLS", initial_window=36)
+        # initial_window is set internally by signal_rolling_ols (36, per methodology §5.4)
+        ols_mom   = build_mom_pipeline(returns_panel, f, 1, "OLS")
         ols_valid = ols_mom[ols_mom["n_active_cohorts"] == 1].dropna(subset=["mom_return"])
 
         # V-OLS: out-of-sample timing
@@ -727,16 +758,18 @@ def run_section5(
 ) -> dict:
     """
     §5 master orchestrator.
-    Returns {"grid_A": dict, "grid_B": dict} for §6 downstream use.
+    Returns {"grid_A", "grid_B", "grid_A_port_h1", "grid_B_port_h1"} for downstream
+    sections. The "_port_h1" caches hold per-portfolio (dynamic sextile/quintile)
+    return series for h=1, reused by §7 sextile-by-sextile correlations.
     """
     log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     log.info("§5.2 f×h grid — Signal A (excess return)")
-    grid_A = compute_fxh_grid(returns_panel, "A")
+    grid_A, grid_A_port_h1 = compute_fxh_grid(returns_panel, "A")
 
     log.info("§5.2 f×h grid — Signal B (spot change)")
-    grid_B = compute_fxh_grid(returns_panel, "B")
+    grid_B, grid_B_port_h1 = compute_fxh_grid(returns_panel, "B")
 
     log.info("§5 Portfolio-return table (All / DM / EM, quintile-normalised)")
     build_portfolio_return_table(returns_panel, rx_factor)
@@ -750,4 +783,9 @@ def run_section5(
     log.info("§5.5 Post-holding period figure")
     build_post_holding_figure(returns_panel)
 
-    return {"grid_A": grid_A, "grid_B": grid_B}
+    return {
+        "grid_A":         grid_A,
+        "grid_B":         grid_B,
+        "grid_A_port_h1": grid_A_port_h1,
+        "grid_B_port_h1": grid_B_port_h1,
+    }

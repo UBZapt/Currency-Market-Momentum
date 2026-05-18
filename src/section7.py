@@ -30,7 +30,6 @@ from src.portfolios import (
     compute_cohort_returns,
     compute_mom_series,
     compute_portfolio_series,
-    build_portfolio_pipeline,
 )
 
 F_GRID_CORR  = [1, 3, 6, 9, 12]
@@ -152,15 +151,19 @@ def _build_carry_pipeline(
 def _build_table10(
     ct_df: pd.DataFrame,
     carry_port_df: pd.DataFrame,
-    returns_panel: pd.DataFrame,
     section5_result: dict,
 ) -> pd.DataFrame:
     """
     Table 10: Part A — carry sextile stats; Part B — MOM-carry correlations.
     Exports table10_carry_correlations.csv.
+
+    MOM per-portfolio series are pulled from section5_result['grid_A_port_h1']
+    — the dynamic sextile/quintile sort used to build grid_A in §5 — so no
+    signal/assign/cohort work is duplicated here.
     """
-    log    = _get_log()
-    grid_A = section5_result["grid_A"]
+    log         = _get_log()
+    grid_A      = section5_result["grid_A"]
+    grid_A_port = section5_result["grid_A_port_h1"]
 
     # ── Part A: carry portfolio statistics ────────────────────────────────────
     max_p  = int(carry_port_df["portfolio"].max())
@@ -232,11 +235,12 @@ def _build_table10(
         aligned_ct = pd.DataFrame({"CT": ct_indexed, "MOM": mom_series}).dropna()
         overall    = aligned_ct["CT"].corr(aligned_ct["MOM"]) if len(aligned_ct) >= 5 else np.nan
 
-        # Per-portfolio sextile correlations
-        mom_port = build_portfolio_pipeline(returns_panel, f, H_STAR, "A")
-        mom_port = mom_port[mom_port["n_active_cohorts"] == H_STAR][
-            ["date", "portfolio", "avg_return"]
-        ]
+        # Per-portfolio sextile correlations — reuse the cached per-portfolio series
+        # built by §5 from the same dynamic sort that produced grid_A.
+        mom_port = grid_A_port.get(key)
+        if mom_port is None or mom_port.empty:
+            log.warning("  §7.2: grid_A_port_h1 missing (%d,%d) — skipping f=%d", f, H_STAR, f)
+            continue
         mom_pivot = mom_port.pivot(index="date", columns="portfolio", values="avg_return")
 
         port_corrs = {}
@@ -291,12 +295,28 @@ def _build_table10(
 
 def _tertile_labels(N: int) -> np.ndarray:
     """
-    Assign tertile labels 1/2/3 to N pre-sorted items using linspace boundaries.
-    Extras go to higher-indexed groups (consistent with assign_portfolios remainder rule).
+    Assign tertile labels 1/2/3 to N pre-sorted items.
+
+    Uses the same explicit floor/ceiling allocation as assign_portfolios:
+      base   = N // 3
+      extras = N %% 3
+      The first (3 - extras) groups receive `base` items; the remaining
+      `extras` groups receive `base + 1` items. Extras therefore go to the
+      higher-indexed groups, matching the sextile/quintile sort convention
+      exactly (no pd.cut, no linspace boundary effects).
     """
-    ranks = np.arange(1, N + 1, dtype=float)
-    bins  = np.linspace(0, N, 4)
-    return pd.cut(ranks, bins=bins, labels=[1, 2, 3], include_lowest=True).astype(int)
+    if N < 3:
+        raise ValueError(f"_tertile_labels requires N >= 3, got {N}")
+    k      = 3
+    base   = N // k
+    extras = N %  k
+    thresh = (k - extras) * base
+    ranks  = np.arange(N)
+    return np.where(
+        ranks < thresh,
+        ranks // base + 1,
+        (k - extras) + (ranks - thresh) // (base + 1) + 1,
+    ).astype(int)
 
 
 def _double_sort_f(
@@ -315,9 +335,14 @@ def _double_sort_f(
       cell_series : {(fd, mom): pd.Series(date → avg excess_return)}
       hml_fd_series: {mom_col: pd.Series(date → spread)}  (fd=3 minus fd=1)
     """
+    # Signal A — only burn-in is the natural f-1 lookback for the cumulative
+    # f-month return signal. There is no initial_window applied; the double
+    # sort's effective start date is data_start + (f-1) months.
     mom_sig = build_signal(returns_panel, f, "A")
 
-    # Merge carry and MOM signals on formation date
+    # Merge carry and MOM signals on formation date. carry_sig has no burn-in
+    # window; the inner join below drops the f-1 pre-burn-in dates so the
+    # effective start is governed entirely by the MOM lookback.
     merged = mom_sig.merge(
         carry_sig.rename(columns={"signal": "signal_carry"}),
         on=["date", "currency_code"],
@@ -556,7 +581,7 @@ def run_section7(
 
     log.info("§7.2 MOM-carry correlations ...")
     carry_sig = _make_carry_signal(returns_panel)
-    table10   = _build_table10(ct_df, carry_port_df, returns_panel, section5_result)
+    table10   = _build_table10(ct_df, carry_port_df, section5_result)
 
     log.info("§7.3 Double sort (f in %s) ...", F_GRID_DSORT)
     table11   = _build_table11(returns_panel, carry_sig)
