@@ -10,8 +10,6 @@ skip_month_flag = False (§3 result): no skip-month adjustment applied.
 """
 
 import math
-import logging
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -24,14 +22,16 @@ import matplotlib.pyplot as plt
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
 
-from src.signals    import build_signal
-from src.portfolios import (
+from src.signals       import build_signal
+from src.portfolios    import (
     assign_portfolios,
     compute_cohort_returns,
     compute_mom_series,
     compute_portfolio_series,
     build_mom_pipeline,
 )
+from src.output_writer import add_sheet
+from src.stats         import nw_stats, sig_stars
 
 F_GRID             = [1, 3, 6, 9, 12]
 H_GRID             = [1, 3, 6, 9, 12]
@@ -39,66 +39,12 @@ DISPLAY_STRATEGIES = [(1, 1), (6, 1), (12, 1)]
 OLS_F_GRID         = [3, 6, 9, 12]   # f=1 excluded (initial_window=36 makes it ill-defined)
 
 
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section5")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-# ── HAC inference ──────────────────────────────────────────────────────────────
-
-def _nw_lag(T: int) -> int:
-    """Andrews (1991) primary lag: L = ceil(0.75 * T^(1/3))."""
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
-def _nw_stats(series) -> dict:
-    """
-    HAC Newey-West t-test H0: mean=0 plus standard t-stat.
-    Returns: mean, t, p, se, nw_lag, T, std_t.
-    """
-    arr = np.asarray(series, dtype=float)
-    arr = arr[~np.isnan(arr)]
-    T   = len(arr)
-    if T < 5:
-        return {"mean": float("nan"), "t": float("nan"), "p": float("nan"),
-                "se": float("nan"), "nw_lag": 0, "T": T, "std_t": float("nan")}
-    L   = _nw_lag(T)
-    res = sm.OLS(arr, np.ones(T)).fit(cov_type="HAC", cov_kwds={"maxlags": L})
-    return {
-        "mean":   float(res.params[0]),
-        "t":      float(res.tvalues[0]),
-        "p":      float(res.pvalues[0]),
-        "se":     float(res.bse[0]),
-        "nw_lag": L,
-        "T":      T,
-        "std_t":  float(np.mean(arr) / (np.std(arr, ddof=1) / np.sqrt(T))),
-    }
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p):
-        return ""
-    if p < 0.01:
-        return "***"
-    if p < 0.05:
-        return "**"
-    if p < 0.10:
-        return "*"
-    return ""
-
-
 # ── Full f×h grid (internal, dynamic sextile/quintile rule) ───────────────────
 
 def _export_fxh_wide(stats_dict: dict, signal_type: str, signal_label: str) -> None:
     """
     Wide-format CSV: four stacked blocks — annualised mean × 100, NW t-stat, standard t-stat, p-value.
-    stats_dict: {(f, h): _nw_stats dict} — precomputed once in compute_fxh_grid.
+    stats_dict: {(f, h): nw_stats dict} — precomputed once in compute_fxh_grid.
     """
     col_label = "Row"
     h_cols    = [f"h={h}" for h in H_GRID]
@@ -138,10 +84,7 @@ def _export_fxh_wide(stats_dict: dict, signal_type: str, signal_label: str) -> N
         + [spacer, hdr("p-value (3dp, NW HAC)")]
         + pval_rows
     )
-    pd.DataFrame(rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / f"table_fxh_signal_{signal_type}.csv", index=False
-    )
-    _get_log().info("Written: table_fxh_signal_%s.csv", signal_type)
+    add_sheet(f"table_fxh_signal_{signal_type}", pd.DataFrame(rows, columns=all_cols))
 
 
 def _print_fxh_table(stats_dict: dict, signal_type: str, signal_label: str) -> None:
@@ -167,7 +110,7 @@ def _print_fxh_table(stats_dict: dict, signal_type: str, signal_label: str) -> N
                 nw_line   += f"{'':>{col_w}}"
                 std_line  += f"{'':>{col_w}}"
             else:
-                nw_str  = f"[{s['t']:.2f}]{_sig_stars(s['p'])}"
+                nw_str  = f"[{s['t']:.2f}]{sig_stars(s['p'])}"
                 std_str = f"({s['std_t']:.2f})"
                 mean_line += f"{s['mean']*1200:>{col_w}.2f}"
                 nw_line   += f"{nw_str:>{col_w}}"
@@ -195,7 +138,6 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> tuple[dic
     signal_type: 'A' (excess return) or 'B' (spot change). Neither uses any initial_window.
     """
     assert signal_type in ("A", "B"), f"signal_type must be 'A' or 'B', got '{signal_type}'"
-    log          = _get_log()
     signal_label = "Excess Returns" if signal_type == "A" else "Spot Rate Changes"
 
     data_start = returns_panel.dropna(subset=["excess_return"])["date"].min()
@@ -209,16 +151,14 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> tuple[dic
         try:
             signal_df   = build_signal(returns_panel, f, signal_type)
             assignments = assign_portfolios(signal_df)
-        except Exception as e:
-            log.warning("  SKIP f=%d signal=%s: %s", f, signal_type, e)
+        except Exception:
             continue
 
         for h in H_GRID:
             try:
                 cohort_rets = compute_cohort_returns(assignments, returns_panel, h)
                 mom         = compute_mom_series(cohort_rets, h)
-            except Exception as e:
-                log.warning("  SKIP f=%d h=%d signal=%s: %s", f, h, signal_type, e)
+            except Exception:
                 continue
 
             mom_valid = mom[mom["n_active_cohorts"] == h].dropna(subset=["mom_return"])
@@ -249,18 +189,18 @@ def compute_fxh_grid(returns_panel: pd.DataFrame, signal_type: str) -> tuple[dic
 
     # Compute stats once per cell — shared by export and terminal display
     stats_dict = {
-        key: _nw_stats(series.values)
+        key: nw_stats(series.values)
         for key, series in grid_dict.items()
         if len(series) >= 5
     }
 
-    pd.DataFrame(records).sort_values(["f", "h", "date"]).reset_index(drop=True).to_csv(
-        OUTPUT_DIR / f"fxh_series_{signal_type}.csv", index=False
+    add_sheet(
+        f"fxh_series_{signal_type}",
+        pd.DataFrame(records).sort_values(["f", "h", "date"]).reset_index(drop=True),
     )
     _export_fxh_wide(stats_dict, signal_type, signal_label)
     _print_fxh_table(stats_dict, signal_type, signal_label)
 
-    log.info("f×h grid (%s): %d cells computed", signal_type, len(grid_dict))
     return grid_dict, port_h1
 
 
@@ -273,7 +213,7 @@ def _assign_quintile_only(signal_df: pd.DataFrame, min_n: int = 15) -> pd.DataFr
     Do NOT use for momentum construction — use assign_portfolios() for that.
     Tie-break and remainder allocation match assign_portfolios() conventions.
 
-    min_n: full cross-section uses 15 (methodology default); subsamples (DM/EM) use 5
+    min_n: full cross-section uses 15; subsamples (DM/EM) use 5
            because DM has only ~12 currencies — the practical quintile floor.
     """
     required = {"date", "currency_code", "signal"}
@@ -398,10 +338,7 @@ def _export_portfolio_wide(stats_cache: dict) -> None:
         + [spacer]
         + build_block("p-value (3dp)", "p")
     )
-    pd.DataFrame(rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / "table_portfolio_returns.csv", index=False
-    )
-    _get_log().info("Written: table_portfolio_returns.csv")
+    add_sheet("table_portfolio_returns", pd.DataFrame(rows, columns=all_cols))
 
 
 def _print_portfolio_table(stats_cache: dict) -> None:
@@ -442,7 +379,7 @@ def _print_portfolio_table(stats_cache: dict) -> None:
                     mean_line  += f"{'N/A':>{col_w}}"
                     tstat_line += f"{'':>{col_w}}"
                 else:
-                    t_str = f"[{cs['t']:.2f}]{_sig_stars(cs['p'])}"
+                    t_str = f"[{cs['t']:.2f}]{sig_stars(cs['p'])}"
                     mean_line  += f"{cs['mean']*100:>{col_w}.2f}"
                     tstat_line += f"{t_str:>{col_w}}"
         print(mean_line)
@@ -464,7 +401,6 @@ def build_portfolio_return_table(
     DM/EM use min_n=5 (~2-3 currencies/quintile).
     RX row uses full-sample rx_factor date-aligned to each strategy's observation window.
     """
-    log         = _get_log()
     samples     = [("All", None), ("DM", "DM"), ("EM", "EM")]
     stats_cache: dict = {}
 
@@ -473,22 +409,21 @@ def build_portfolio_return_table(
             strat_label = f"MOM({f},{h})"
             try:
                 port_ser = _quintile_portfolio_series(returns_panel, f, h, msci_filter)
-            except Exception as e:
-                log.warning("  SKIP %s %s: %s", sample_label, strat_label, e)
+            except Exception:
                 continue
 
             cell_stats: dict = {}
             for p in range(1, 6):
                 vals = port_ser[port_ser["portfolio"] == p]["avg_return"].dropna().values
-                cell_stats[f"P{p}"] = _nw_stats(vals)
+                cell_stats[f"P{p}"] = nw_stats(vals)
 
             p5 = port_ser[port_ser["portfolio"] == 5].set_index("date")["avg_return"]
             p1 = port_ser[port_ser["portfolio"] == 1].set_index("date")["avg_return"]
-            cell_stats["MOM"] = _nw_stats((p5 - p1).dropna().values)
+            cell_stats["MOM"] = nw_stats((p5 - p1).dropna().values)
 
             active_dates     = port_ser["date"].unique()
             rx_vals          = rx_factor[rx_factor["date"].isin(active_dates)]["rx_factor"].dropna().values
-            cell_stats["RX"] = _nw_stats(rx_vals)
+            cell_stats["RX"] = nw_stats(rx_vals)
 
             stats_cache[(sample_label, strat_label)] = cell_stats
 
@@ -504,7 +439,6 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
     Equal-weighted (Signal A) vs rolling-OLS for f∈{3,6,9,12}, h=1.
     f=1 excluded: initial_window=36 leaves no meaningful lag decay.
     """
-    log                = _get_log()
     data_start         = returns_panel.dropna(subset=["excess_return"])["date"].min()
     expected_ols_start = data_start + pd.DateOffset(months=36)
     records = []
@@ -512,7 +446,7 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
     for f in OLS_F_GRID:
         ew_mom   = build_mom_pipeline(returns_panel, f, 1, "A")
         ew_valid = ew_mom[ew_mom["n_active_cohorts"] == 1].dropna(subset=["mom_return"])
-        ew_stats = _nw_stats(ew_valid["mom_return"].values)
+        ew_stats = nw_stats(ew_valid["mom_return"].values)
 
         # initial_window is set internally by signal_rolling_ols (36, per methodology §5.4)
         ols_mom   = build_mom_pipeline(returns_panel, f, 1, "OLS")
@@ -526,7 +460,7 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
                 f"< expected {expected_ols_start.date()}"
             )
 
-        ols_stats = _nw_stats(ols_valid["mom_return"].values)
+        ols_stats = nw_stats(ols_valid["mom_return"].values)
         records.append({
             "f":        f,
             "ew_mean":  ew_stats["mean"],  "ew_t":  ew_stats["t"],  "ew_p":  ew_stats["p"],
@@ -546,7 +480,7 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
         "T(EW)":                     r["ew_T"],
         "T(OLS)":                    r["ols_T"],
     } for r in records]
-    pd.DataFrame(csv_rows).to_csv(OUTPUT_DIR / "table_ols_comparison.csv", index=False)
+    add_sheet("table_ols_comparison", pd.DataFrame(csv_rows))
 
     W = 84
     print()
@@ -562,8 +496,8 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
     )
     print("-" * W)
     for row in records:
-        ew_t_str  = f"[{row['ew_t']:.2f}]{_sig_stars(row['ew_p'])}"
-        ols_t_str = f"[{row['ols_t']:.2f}]{_sig_stars(row['ols_p'])}"
+        ew_t_str  = f"[{row['ew_t']:.2f}]{sig_stars(row['ew_p'])}"
+        ols_t_str = f"[{row['ols_t']:.2f}]{sig_stars(row['ols_p'])}"
         print(
             f"  {row['f']:<5}"
             f"{row['ew_mean']*1200:>9.2f}{ew_t_str:>13}"
@@ -574,7 +508,6 @@ def build_ols_comparison_table(returns_panel: pd.DataFrame) -> pd.DataFrame:
         )
     print("=" * W)
 
-    log.info("Written: table_ols_comparison.csv (%d rows)", len(csv_rows))
     return pd.DataFrame(csv_rows)
 
 
@@ -588,18 +521,16 @@ def build_seasonality_table(
     Exports table_seasonality.csv with stacked blocks: mean × 100, NW t-stat, p-value.
     Calendar months 1-12 × MOM(1,1), MOM(6,1), MOM(12,1). Reuses grid_A series dict.
     """
-    log = _get_log()
     records = []
 
     for f, h in DISPLAY_STRATEGIES:
         key = (f, h)
         if key not in grid_A:
-            log.warning("  Seasonality: grid_A missing (%d,%d) — skipping", f, h)
             continue
         series      = grid_A[key]
         strat_label = f"MOM({f},{h})"
         for month in range(1, 13):
-            s = _nw_stats(series[series.index.month == month].dropna().values)
+            s = nw_stats(series[series.index.month == month].dropna().values)
             records.append({"calendar_month": month, "strategy": strat_label, **s})
 
     df_long      = pd.DataFrame(records)
@@ -626,9 +557,7 @@ def build_seasonality_table(
         + [spacer]
         + _wide_block("p-value (3dp)", "p")
     )
-    pd.DataFrame(wide_rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / "table_seasonality.csv", index=False
-    )
+    add_sheet("table_seasonality", pd.DataFrame(wide_rows, columns=all_cols))
 
     # Terminal: mean only
     col_w = 18
@@ -650,7 +579,6 @@ def build_seasonality_table(
         print(row_line)
     print("=" * W)
 
-    log.info("Written: table_seasonality.csv")
     return df_long
 
 
@@ -698,8 +626,6 @@ def _post_holding_one_strategy(
     # V-POST: T_k non-increasing in k; T_K > 0
     T_k_full = T_k.reindex(range(1, K + 1), fill_value=0)
     diffs    = T_k_full.diff().dropna()
-    if (diffs > 0).any():
-        _get_log().warning("  T_k not non-increasing for f=%d (gap in data)", f)
     assert T_k_full.get(K, 0) > 0, \
         f"T_{K} = 0 for f={f} — no cohorts complete {K} months post-formation"
 
@@ -727,7 +653,6 @@ def build_post_holding_figure(returns_panel: pd.DataFrame) -> None:
     MOM(1,1), MOM(6,1), MOM(12,1): frozen cohort tracked 60 months post-formation.
     Shaded bands are ±1.96 × cross-cohort SE of cumulative high-minus-low spread.
     """
-    log        = _get_log()
     K          = 60
     strategies = [(1, "#1f77b4"), (6, "#ff7f0e"), (12, "#2ca02c")]
 
@@ -747,7 +672,7 @@ def build_post_holding_figure(returns_panel: pd.DataFrame) -> None:
     out_path = OUTPUT_DIR / "figure1_post_holding.pdf"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-    log.info("Written: %s", out_path.name)
+    print(f"Written: {out_path.name}")
 
 
 # ── Master function ────────────────────────────────────────────────────────────
@@ -762,25 +687,19 @@ def run_section5(
     sections. The "_port_h1" caches hold per-portfolio (dynamic sextile/quintile)
     return series for h=1, reused by §7 sextile-by-sextile correlations.
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("§5.2 f×h grid — Signal A (excess return)")
+    print("Loading: §5.2 f×h grid — Signal A (excess return) ...")
     grid_A, grid_A_port_h1 = compute_fxh_grid(returns_panel, "A")
-
-    log.info("§5.2 f×h grid — Signal B (spot change)")
+    print("Loading: §5.2 f×h grid — Signal B (spot change) ...")
     grid_B, grid_B_port_h1 = compute_fxh_grid(returns_panel, "B")
-
-    log.info("§5 Portfolio-return table (All / DM / EM, quintile-normalised)")
+    print("Loading: §5 portfolio-return table (All / DM / EM) ...")
     build_portfolio_return_table(returns_panel, rx_factor)
-
-    log.info("§5.4 Rolling-OLS comparison")
+    print("Loading: §5.4 rolling-OLS comparison ...")
     build_ols_comparison_table(returns_panel)
-
-    log.info("§4.4 Seasonality")
+    print("Loading: §4.4 seasonality table ...")
     build_seasonality_table(returns_panel, grid_A)
-
-    log.info("§5.5 Post-holding period figure")
+    print("Loading: §5.5 post-holding period figure ...")
     build_post_holding_figure(returns_panel)
 
     return {

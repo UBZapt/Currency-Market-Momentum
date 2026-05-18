@@ -217,17 +217,52 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Project-specific exclusions (CLAUDE.md §.gitignore)
+# Local planning / instruction files (not published)
 CLAUDE.md
+CLAUDE.local.md
 Methodology_Detailed.md
+.mcp.json
 
-# Large raw data files (not version-controlled)
+# Licensed raw data (LSEG Datastream via WRDS — redistribution not permitted)
 FX_SPOT_Rates_USD.csv
 FX_1MFD_Rates_*.csv
 FX_metadata_*.csv
 ff_factors.csv
+/*.csv
+/*.xlsx
+/*.xls
+/*.parquet
+
+# Third-party papers, briefs and reports kept locally
+/*.pdf
+/*.docx
 
 # Generated outputs and logs
 output/
 logs/
-.claude/ 
+.claude/
+
+# Editor settings
+.vscode/
+.idea/
+
+# OS / filesystem metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / credentials (defensive — none currently present)
+secrets.*
+credentials.*
+.env.*
+.pgpass
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor / merge backups
+*.bak
+*.orig
+*.swp
+*~

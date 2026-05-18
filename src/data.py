@@ -3,7 +3,7 @@
 src/data.py
 
 Data cleaning and preparation for the Currency Momentum project.
-Implements the data pipeline defined in Methodology_Detailed.md §0.3 / §1.
+Implements the data pipeline (§1).
 
 Run standalone:  python src/data.py
 Import in MAIN:  from src.data import clean_data; result = clean_data()
@@ -180,17 +180,10 @@ def map_instruments(meta: pd.DataFrame,
     for d in (spot_map, fwd_usd_map):
         d.pop("USD", None)
 
-    both      = sorted(set(spot_map) & set(fwd_usd_map))
-    spot_only = sorted(set(spot_map) - set(fwd_usd_map))
-
     if not spot_map:
         log.error("No SPOT instruments found in metadata")
         sys.exit(1)
 
-    log.info(
-        "Instruments: %d spot, %d USD 1M fwd, %d both, %d spot-only",
-        len(spot_map), len(fwd_usd_map), len(both), len(spot_only),
-    )
     return spot_map, fwd_usd_map
 
 
@@ -235,9 +228,7 @@ def load_fx_chunked(path: Path, col_map: dict, relevant_codes: set,
         )
         sys.exit(1)
 
-    df = pd.concat(chunks, ignore_index=True)
-    log.info("%s: %d rows from %d codes", path.name, total_kept, len(codes))
-    return df
+    return pd.concat(chunks, ignore_index=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -304,12 +295,6 @@ def load_and_invert_non_usd_fwd(
     df["bidrate"]   = 1.0 / old_ask    # lower foreign/USD after inversion
     df["offerrate"] = 1.0 / old_bid    # higher foreign/USD after inversion
 
-    log.info(
-        "Non-USD forward inverted: %s (code=%d), %d rows, "
-        "sample mid after inversion: %.4f",
-        target_ccy, code, len(df),
-        float(df["midrate"].dropna().median()),
-    )
     return df[["exrateintcode", "exratedate", "midrate", "bidrate", "offerrate"]], code
 
 
@@ -339,7 +324,6 @@ def check_quote_orientation(df: pd.DataFrame, spot_map: dict,
         log.error("GATE 5 FAIL — quote orientation anomaly: %s", issues)
         log.error("All rates must be in foreign/USD convention. Halting pipeline.")
         sys.exit(1)
-    log.info("Quote orientation check passed")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -365,10 +349,6 @@ def derive_mid_quotes(df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
 
     df.loc[mask, "midrate"] = (df.loc[mask, "bidrate"] + df.loc[mask, "askrate"]) / 2.0
     df["mid_derived"] = mask
-
-    n = int(mask.sum())
-    if n:
-        log.info("Mid quote derived from (bid+ask)/2 for %d rows", n)
     return df
 
 
@@ -421,12 +401,7 @@ def build_instrument_long(eom: pd.DataFrame, spot_map: dict,
         code_to_info[int(code)] = (ccy, "spot")
     for ccy, code in fwd_map.items():
         icode = int(code)
-        if icode in code_to_info:
-            log.warning(
-                "Code %d already assigned to spot(%s); skipping fwd1m(%s)",
-                icode, code_to_info[icode][0], ccy,
-            )
-        else:
+        if icode not in code_to_info:
             code_to_info[icode] = (ccy, "fwd1m")
 
     eom = eom.copy()
@@ -471,7 +446,6 @@ def pivot_to_panel(long_df: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
     ]
 
     if fwd.empty:
-        log.warning("No 1M forward rows found — panel will have no forward columns")
         panel = spot[spot_keep].copy()
         for col in ["forward_mid_1m", "forward_bid_1m", "forward_ask_1m"]:
             panel[col] = np.nan
@@ -517,12 +491,6 @@ def apply_msci_classification(panel: pd.DataFrame,
     panel["msci_class"] = panel["currency_code"].map(
         lambda c: "DM" if c in MSCI_DM else ("EM" if c in MSCI_EM else None)
     )
-    counts = (
-        panel.drop_duplicates("currency_code")["msci_class"]
-             .value_counts(dropna=False)
-             .to_dict()
-    )
-    log.info("MSCI classification applied: %s", counts)
     return panel
 
 
@@ -535,15 +503,6 @@ def flag_and_exclude_pegs(panel: pd.DataFrame,
     mask     = panel["currency_code"].isin(PEGGED_CURRENCIES)
     excluded = panel[mask].copy()
     main     = panel[~mask].copy()
-
-    log.info(
-        "Pegged currencies excluded: %s -> %d rows removed",
-        sorted(PEGGED_CURRENCIES), len(excluded),
-    )
-    log.info(
-        "Main panel after exclusions: %d rows, %d currencies",
-        len(main), main["currency_code"].nunique(),
-    )
     return main, excluded
 
 
@@ -564,20 +523,8 @@ def filter_forward_coverage(panel: pd.DataFrame,
     keep_ccys = has_fwd[has_fwd].index
     drop_ccys = has_fwd[~has_fwd].index
 
-    if not drop_ccys.empty:
-        log.info(
-            "Forward coverage filter: dropping %d spot-only currencies "
-            "(no forward_mid_1m in sample): %s",
-            len(drop_ccys), sorted(drop_ccys.tolist()),
-        )
-
     retained  = panel[panel["currency_code"].isin(keep_ccys)].copy()
     spot_only = panel[panel["currency_code"].isin(drop_ccys)].copy()
-
-    log.info(
-        "Panel after forward filter: %d rows, %d currencies with forward coverage",
-        len(retained), retained["currency_code"].nunique(),
-    )
     return retained, spot_only
 
 
@@ -614,18 +561,11 @@ def build_coverage_audit(
             "n_forward_months": int(grp["forward_mid_1m"].notna().sum()),
         })
 
-    audit = (
+    return (
         pd.DataFrame(rows)
           .sort_values(["status", "currency_code"])
           .reset_index(drop=True)
     )
-    log.info(
-        "Coverage audit: %d kept, %d spot_only_dropped, %d pegged_excluded",
-        (audit["status"] == "kept").sum(),
-        (audit["status"] == "spot_only_dropped").sum(),
-        (audit["status"] == "pegged_excluded").sum(),
-    )
-    return audit
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -647,10 +587,6 @@ def add_log_fields(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
             vals = panel[col].astype(float)
             bad  = (vals <= 0)
             if bad.any():
-                log.warning(
-                    "Column '%s': %d non-positive values set to NaN before log transform",
-                    col, int(bad.sum()),
-                )
                 vals = vals.where(~bad, other=np.nan)
             panel[f"log_{col}"] = np.log(vals)
     return panel
@@ -664,19 +600,6 @@ def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
     if panel.empty:
         log.error("Panel is empty after all filters")
         sys.exit(1)
-
-    actual_start = panel["date"].min()
-    actual_end   = panel["date"].max()
-
-    expected_first = pd.Period(SAMPLE_START, "M").to_timestamp("M")
-    expected_last  = pd.Period(SAMPLE_END,   "M").to_timestamp("M")
-
-    if actual_start > expected_first:
-        log.warning("Panel starts %s; expected on or before %s",
-                    actual_start.date(), expected_first.date())
-    if actual_end < expected_last:
-        log.warning("Panel ends %s; expected on or after %s",
-                    actual_end.date(), expected_last.date())
 
     required_cols = [
         "date", "currency_code",
@@ -697,12 +620,6 @@ def validate_panel(panel: pd.DataFrame, log: logging.Logger) -> None:
             inf_count,
         )
         sys.exit(1)
-
-    log.info(
-        "Panel: %s to %s, %d rows, %d currencies",
-        actual_start.date(), actual_end.date(),
-        len(panel), panel["currency_code"].nunique(),
-    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -729,9 +646,6 @@ def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
     desired    = ["mktrf", "smb", "hml", "umd", "rf"]
     avail_map  = {c.lower(): c for c in df.columns}
     keep_cols  = ["date"] + [avail_map[d] for d in desired if d in avail_map]
-    missing_f  = set(desired) - set(avail_map)
-    if missing_f:
-        log.warning("Factor columns not found in ff_factors.csv: %s", missing_f)
 
     df = df[keep_cols].copy()
     df = df[(df["date"] >= SAMPLE_START) & (df["date"] <= SAMPLE_END)].copy()
@@ -742,7 +656,6 @@ def clean_factors(path: Path, col_map: dict, log: logging.Logger) -> pd.DataFram
         log.error("Duplicate dates in ff_factors.csv after cleaning")
         sys.exit(1)
 
-    log.info("Factors: %d months, columns: %s", len(df), list(df.columns))
     return df
 
 
@@ -764,19 +677,16 @@ def export_outputs(
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     panel.to_csv(OUTPUT_DIR / "fx_panel_clean.csv", index=False)
-    log.info(
-        "fx_panel_clean.csv:   %d rows, %d currencies",
-        len(panel), panel["currency_code"].nunique(),
-    )
+    print("Written: fx_panel_clean.csv")
 
     excluded.to_csv(OUTPUT_DIR / "excluded_pegged.csv", index=False)
-    log.info("excluded_pegged.csv:  %d rows", len(excluded))
+    print("Written: excluded_pegged.csv")
 
     factors.to_csv(OUTPUT_DIR / "ff_factors_clean.csv", index=False)
-    log.info("ff_factors_clean.csv: %d rows", len(factors))
+    print("Written: ff_factors_clean.csv")
 
     audit.to_csv(OUTPUT_DIR / "coverage_audit.csv", index=False)
-    log.info("coverage_audit.csv:   %d currencies", len(audit))
+    print("Written: coverage_audit.csv")
 
     schemas_serial = {}
     for name, s in schemas.items():
@@ -786,7 +696,7 @@ def export_outputs(
         }
     with open(OUTPUT_DIR / "schema_mappings.json", "w", encoding="utf-8") as f:
         json.dump(schemas_serial, f, indent=2)
-    log.info("schema_mappings.json: written")
+    print("Written: schema_mappings.json")
 
 
 
@@ -797,7 +707,7 @@ def export_outputs(
 def clean_data() -> dict:
     """Run the full data cleaning pipeline; return {'panel', 'excluded', 'factors'}."""
     log = setup_logging()
-    log.info("Data cleaning pipeline starting")
+    print("Loading: §1 data cleaning (FX panel + factors) ...")
 
     # ── Gate 1: file availability ──
     resolve_inputs(INPUT_PATHS, log)
@@ -840,10 +750,6 @@ def clean_data() -> dict:
         non_usd_code_map[code] = ccy
 
     raw_fwd_non_usd = pd.concat(non_usd_dfs, ignore_index=True)
-    log.info(
-        "Non-USD forwards combined: %d rows for %s",
-        len(raw_fwd_non_usd), NON_USD_FWD_CCYS,
-    )
 
     # ── Gate 5: quote orientation (spot rates only) ──
     check_quote_orientation(raw_spot, spot_map, log)
@@ -876,17 +782,8 @@ def clean_data() -> dict:
         ["date", "currency_code", "rate_type", "midrate", "bidrate", "askrate"]
     ].copy()
 
-    log.info(
-        "Non-USD forward long: %d rows for currencies %s",
-        len(non_usd_long), sorted(non_usd_code_map.values()),
-    )
-
     # ── Combined long format ──
     long_df = pd.concat([spot_long, fwd_usd_long, non_usd_long], ignore_index=True)
-    log.info(
-        "Combined long panel: %d rows, %d unique currencies",
-        len(long_df), long_df["currency_code"].nunique(),
-    )
 
     # ── Pivot to wide panel ──
     panel = pivot_to_panel(long_df, log)
@@ -921,11 +818,8 @@ def clean_data() -> dict:
     # ── Export all outputs ──
     export_outputs(panel, spot_only, excluded, factors, audit, schemas, spot_map, fwd_all_map, log)
 
-    log.info("Data cleaning pipeline complete")
     return {"panel": panel, "excluded": excluded, "factors": factors}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    clean_data()

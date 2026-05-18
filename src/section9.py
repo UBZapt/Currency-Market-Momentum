@@ -2,9 +2,7 @@
 """
 src/section9.py — §9.1 Fama-MacBeth cross-sectional regressions (Table 13).
 
-Replicates MSSS Table 6. §9.2 (individual lag decomposition / Table 14) is
-intentionally omitted: rolling-OLS weights in §5.4 did not produce meaningful
-results, so the lag-decomposition extension is not reported.
+Replicates MSSS Table 6.
 
 Three panels, ℓ ∈ {1, 6, 12}, with five specifications per panel:
   (1) rx_{t-ℓ+1:t}                    — cumulative excess return alone
@@ -28,9 +26,6 @@ Cumulative regressors use the no-skip convention (skip_month_flag = False from �
 Δs is the sign-flipped spot_change column from §2.2 throughout.
 """
 
-import math
-import logging
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +34,9 @@ import statsmodels.api as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
+
+from src.output_writer import add_sheet
+from src.stats         import nw_lag, sig_stars
 
 ELL_GRID     = [1, 6, 12]
 PANEL_LABEL  = {1: "Panel A — One month (ℓ = 1)",
@@ -65,33 +63,6 @@ COEF_ORDER  = ["const", "cum_rx", "fd", "cum_ds"]
 COEF_LABEL  = {"const": "Const", "cum_rx": "rx", "fd": "f-s", "cum_ds": "Δs"}
 
 MIN_OBS = 5   # min currencies per cross-section
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section9")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-def _nw_lag(T: int) -> int:
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p):
-        return ""
-    if p < 0.01:
-        return "***"
-    if p < 0.05:
-        return "**"
-    if p < 0.10:
-        return "*"
-    return ""
 
 
 # ── Panel construction ────────────────────────────────────────────────────────
@@ -207,7 +178,7 @@ def _fmb_run(
 
     slopes = pd.DataFrame(slope_rows).set_index("date").sort_index()
     T      = len(slopes)
-    L_nw   = _nw_lag(T)
+    L_nw   = nw_lag(T)
 
     coef, t_ols, p_ols, t_nw, p_nw = {}, {}, {}, {}, {}
     for c in ["const"] + regs:
@@ -258,7 +229,7 @@ def _cell_tstat(result: dict, c: str, kind: str) -> str:
         t, p = result["t_ols"][c], result["p_ols"][c]
     else:
         t, p = result["t_nw"][c],  result["p_nw"][c]
-    return f"[{t:+.2f}]{_sig_stars(p)}"
+    return f"[{t:+.2f}]{sig_stars(p)}"
 
 
 def _cell_r2(result: dict, row_kind: str) -> str:
@@ -280,7 +251,6 @@ def _export_table13(results: dict) -> None:
     results indexed by (ell, spec_id, dep_label).
     Each (panel, spec) emits 3 rows: coefficient value, [std-t], [NW-A-t].
     """
-    log = _get_log()
     coef_cols = ["Const", "rx", "f-s", "Δs", "R²"]
     headers   = ["Panel/Spec/Row"] + [f"{coef_cols[i]} | rx"   for i in range(5)] \
                                    + [f"{coef_cols[i]} | Δs"   for i in range(5)]
@@ -331,10 +301,7 @@ def _export_table13(results: dict) -> None:
             rows.append(build_row(f"{spec_id} [NW-A-t]",  results_by_dep, "nw"))
         rows.append(spacer)
 
-    pd.DataFrame(rows, columns=headers).to_csv(
-        OUTPUT_DIR / "table13_fama_macbeth.csv", index=False
-    )
-    log.info("Written: table13_fama_macbeth.csv")
+    add_sheet("table13_fama_macbeth", pd.DataFrame(rows, columns=headers))
 
 
 # ── Terminal display ──────────────────────────────────────────────────────────
@@ -399,21 +366,16 @@ def run_section9(returns_panel: pd.DataFrame) -> dict:
     -------
     {(ell, spec_id, dep_label): result_dict, ...}
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    print("Loading: §9.1 Fama-MacBeth regressions (Table 13) ...")
     results: dict = {}
     for ell in ELL_GRID:
-        log.info("§9.1 FMB panel ℓ=%d ...", ell)
         fmb_panel = _build_fmb_panel(returns_panel, ell)
         for spec_id, regs in SPECS:
             for dep_label, lhs_col in DEPS:
-                res = _fmb_run(fmb_panel, lhs_col, regs)
-                results[(ell, spec_id, dep_label)] = res
-                if res is None:
-                    log.warning("  ℓ=%d %s dep=%s: no valid cross-sections", ell, spec_id, dep_label)
+                results[(ell, spec_id, dep_label)] = _fmb_run(fmb_panel, lhs_col, regs)
 
     _export_table13(results)
     _print_table13(results)
-    log.info("§9.1 Fama-MacBeth: %d (ℓ, spec, dep) results computed", len(results))
     return results

@@ -16,74 +16,24 @@ L = ceil(0.75 · T^(1/3)). This matches the inference convention used in §5/§7
 """
 
 import math
-import logging
-import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
+
+from src.output_writer import add_sheet
+from src.stats         import nw_stats, sig_stars
 
 F_GRID = [1, 3, 6, 9, 12]
 H_GRID = [1, 3, 6, 9, 12]
 
 
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section8")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-def _nw_lag(T: int) -> int:
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
 def _sharpe_stats(series) -> dict:
-    """
-    Annualised Sharpe ratio + NW HAC t-stat for a monthly return series.
-
-    SR  = sqrt(12) · mean / std        (std uses ddof=1)
-    t   = NW HAC t-stat for mean = 0   (Andrews lag, Newey-West)
-    """
-    arr = np.asarray(series, dtype=float)
-    arr = arr[~np.isnan(arr)]
-    T   = len(arr)
-    if T < 5:
-        return {"sharpe": np.nan, "t": np.nan, "p": np.nan, "T": T, "nw_lag": 0}
-
-    mean = float(np.mean(arr))
-    std  = float(np.std(arr, ddof=1))
-    sharpe = float(np.sqrt(12) * mean / std) if std > 0 else np.nan
-
-    L   = _nw_lag(T)
-    res = sm.OLS(arr, np.ones(T)).fit(cov_type="HAC", cov_kwds={"maxlags": L})
-    return {
-        "sharpe": sharpe,
-        "t":      float(res.tvalues[0]),
-        "p":      float(res.pvalues[0]),
-        "T":      T,
-        "nw_lag": L,
-    }
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p):
-        return ""
-    if p < 0.01:
-        return "***"
-    if p < 0.05:
-        return "**"
-    if p < 0.10:
-        return "*"
-    return ""
+    """nw_stats projected to {sharpe, t, p, T, nw_lag} for §8 display."""
+    s = nw_stats(series)
+    return {"sharpe": s["sharpe"], "t": s["t"], "p": s["p"], "T": s["T"], "nw_lag": s["nw_lag"]}
 
 
 # ── CSV export ────────────────────────────────────────────────────────────────
@@ -127,10 +77,7 @@ def _export_table12(grid_stats: dict, ct_stats: dict) -> None:
         rows.append(ct_sr_row)
         rows.append(ct_t_row)
 
-    pd.DataFrame(rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / "table12_sharpe.csv", index=False
-    )
-    _get_log().info("Written: table12_sharpe.csv")
+    add_sheet("table12_sharpe", pd.DataFrame(rows, columns=all_cols))
 
 
 # ── Terminal display ──────────────────────────────────────────────────────────
@@ -154,7 +101,7 @@ def _print_table12(grid_stats: dict, ct_stats: dict) -> None:
                 sr_line += f"{'N/A':>{col_w}}"
                 t_line  += f"{'':>{col_w}}"
             else:
-                t_str = f"[{s['t']:.2f}]{_sig_stars(s['p'])}"
+                t_str = f"[{s['t']:.2f}]{sig_stars(s['p'])}"
                 sr_line += f"{s['sharpe']:>{col_w}.2f}"
                 t_line  += f"{t_str:>{col_w}}"
         print(sr_line)
@@ -162,7 +109,7 @@ def _print_table12(grid_stats: dict, ct_stats: dict) -> None:
     print("=" * W)
 
     if not math.isnan(ct_stats["sharpe"]):
-        stars = _sig_stars(ct_stats["p"])
+        stars = sig_stars(ct_stats["p"])
         print()
         print(
             f"  Carry portfolio (CT = HML-FD long-short, §7.1): "
@@ -192,9 +139,9 @@ def run_section8(
     {"sharpe_grid": {(f, h): stats_dict}, "ct_sharpe": stats_dict}
     where each stats_dict carries: sharpe, t, p, T, nw_lag.
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    print("Loading: §8 Sharpe ratio grid (Table 12) ...")
     grid_A = section5_result["grid_A"]
     ct_df  = section7_result["ct_series"]
 
@@ -210,5 +157,4 @@ def run_section8(
     _export_table12(grid_stats, ct_stats)
     _print_table12(grid_stats, ct_stats)
 
-    log.info("§8 Sharpe grid: %d Signal A cells + 1 CT row", len(grid_stats))
     return {"sharpe_grid": grid_stats, "ct_sharpe": ct_stats}

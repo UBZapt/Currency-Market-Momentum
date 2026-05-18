@@ -21,32 +21,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
 PANEL_PATH   = OUTPUT_DIR / "fx_panel_clean.csv"
 
-
-def _get_log(verbose: bool = False) -> logging.Logger:
-    log = logging.getLogger("returns")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO if verbose else logging.WARNING)
-    return log
+_log = logging.getLogger("returns")
 
 
-def load_panel(log: logging.Logger) -> pd.DataFrame:
+def load_panel() -> pd.DataFrame:
     if not PANEL_PATH.exists():
-        log.error("Panel not found: %s — run data.py first", PANEL_PATH)
+        _log.error("Panel not found: %s — run data.py first", PANEL_PATH)
         sys.exit(1)
     panel = pd.read_csv(PANEL_PATH)
     panel["date"] = pd.to_datetime(panel["date"], dayfirst=True)
     panel.sort_values(["currency_code", "date"], inplace=True)
     panel.reset_index(drop=True, inplace=True)
-    log.info("Panel: %d rows, %d currencies, %d months",
-             len(panel), panel["currency_code"].nunique(), panel["date"].nunique())
     return panel
 
 
-def compute_returns(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
+def compute_returns(panel: pd.DataFrame) -> pd.DataFrame:
     """
     Period-merge (not shift) so non-consecutive months across data gaps are
     never paired.  Returns sit at realization date t+1; forward_discount at t.
@@ -88,8 +77,6 @@ def compute_returns(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
     df.drop(columns=[c for c in df.columns if c.startswith("lag_")] + ["ym"],
             inplace=True)
 
-    log.info("Returns: %d excess_return obs, %d spot_change obs",
-             df["excess_return"].notna().sum(), df["spot_change"].notna().sum())
     return df[[
         "date", "currency_code", "msci_class",
         "excess_return", "spot_change", "forward_discount",
@@ -98,11 +85,7 @@ def compute_returns(panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
     ]].copy()
 
 
-def validate_returns(
-    returns_panel: pd.DataFrame,
-    panel: pd.DataFrame,
-    log: logging.Logger,
-) -> None:
+def validate_returns(returns_panel: pd.DataFrame, panel: pd.DataFrame) -> None:
     """§0.5: no NaN/Inf excess_return where both forward and spot inputs exist."""
     raw = panel.copy()
     raw["ym"] = raw["date"].dt.to_period("M")
@@ -118,20 +101,18 @@ def validate_returns(
     )
     bad = check["excess_return"].isna() | np.isinf(check["excess_return"])
     if bad.any():
-        log.error("SANITY FAIL — %d NaN/Inf excess_return despite both inputs available",
-                  int(bad.sum()))
+        _log.error("SANITY FAIL — %d NaN/Inf excess_return despite both inputs available",
+                   int(bad.sum()))
         sys.exit(1)
-    log.info("SANITY PASS — excess_return valid across %d eligible rows", len(check))
 
     # spot_change must be NaN wherever forward coverage is absent
     bad_sc = returns_panel[
         returns_panel["forward_discount"].isna() & returns_panel["spot_change"].notna()
     ]
     if not bad_sc.empty:
-        log.error("SANITY FAIL — %d rows have spot_change without forward coverage",
-                  len(bad_sc))
+        _log.error("SANITY FAIL — %d rows have spot_change without forward coverage",
+                   len(bad_sc))
         sys.exit(1)
-    log.info("SANITY PASS — spot_change restricted to forward-rate universe")
 
     # Magnitude gate: a 1M log forward discount above ~0.20 implies spot/forward
     # are mis-aligned (different real dates, wrong units, etc.). EM crisis episodes
@@ -144,29 +125,17 @@ def validate_returns(
             returns_panel["forward_discount"].abs() > FD_THRESHOLD,
             ["date", "currency_code", "forward_discount"],
         ].sort_values("forward_discount", key=abs, ascending=False)
-        log.error(
+        _log.error(
             "SANITY FAIL — |forward_discount| max = %.4f exceeds %.2f; "
             "%d offending rows. First few:\n%s",
             fd_abs_max, FD_THRESHOLD, len(bad), bad.head(10).to_string(index=False),
         )
         sys.exit(1)
-    log.info("SANITY PASS — |forward_discount| max = %.4f (< %.2f)",
-             fd_abs_max, FD_THRESHOLD)
 
 
-def validate_quote_coverage(returns_panel: pd.DataFrame, log: logging.Logger) -> None:
-    """Warn on missing bid/ask primitives for cost-eligible rows (§6.x assertion 5)."""
-    eligible = returns_panel.dropna(subset=["excess_return"])
-    for col in ["fwd_bid_t", "fwd_ask_t", "spot_bid_t1", "spot_ask_t1"]:
-        n = int(eligible[col].isna().sum())
-        if n:
-            log.warning("%d / %d eligible rows missing '%s' — Step 6 must drop these",
-                        n, len(eligible), col)
-
-
-def compute_rx_factor(returns_panel: pd.DataFrame, log: logging.Logger) -> pd.DataFrame:
+def compute_rx_factor(returns_panel: pd.DataFrame) -> pd.DataFrame:
     """RX_t = equal-weighted mean excess return across currencies at month t (§2.4)."""
-    rx = (
+    return (
         returns_panel.dropna(subset=["excess_return"])
         .groupby("date")
         .agg(rx_factor=("excess_return", "mean"), n_currencies=("excess_return", "count"))
@@ -174,11 +143,9 @@ def compute_rx_factor(returns_panel: pd.DataFrame, log: logging.Logger) -> pd.Da
         .sort_values("date")
         .reset_index(drop=True)
     )
-    log.info("RX factor: %d months, avg N_t=%.1f", len(rx), rx["n_currencies"].mean())
-    return rx
 
 
-def cross_check_decomposition(returns_panel: pd.DataFrame, log: logging.Logger) -> None:
+def cross_check_decomposition(returns_panel: pd.DataFrame) -> None:
     """Verify rx_{t+1} = fd_t + spot_change_{t+1} up to floating-point tolerance."""
     df  = returns_panel.copy()
     df["ym"] = df["date"].dt.to_period("M")
@@ -190,42 +157,32 @@ def cross_check_decomposition(returns_panel: pd.DataFrame, log: logging.Logger) 
     df  = df.merge(fd_lag, on=["currency_code", "ym"], how="left").drop(columns=["ym"])
     sub = df.dropna(subset=["excess_return", "fd_lag", "spot_change"])
     if sub.empty:
-        log.warning("DECOMP CHECK — no rows with all three fields non-NaN")
         return
 
     max_resid = float(
         (sub["excess_return"] - (sub["fd_lag"] + sub["spot_change"])).abs().max()
     )
-    log.info("DECOMP CHECK — max residual %.2e across %d rows", max_resid, len(sub))
     if max_resid > 1e-8:
-        log.error("DECOMP CHECK FAIL — residual exceeds 1e-8 tolerance")
+        _log.error("DECOMP CHECK FAIL — residual %.2e exceeds 1e-8 tolerance", max_resid)
         sys.exit(1)
 
 
-def export_outputs(
-    returns_panel: pd.DataFrame,
-    rx_factor: pd.DataFrame,
-    log: logging.Logger,
-) -> None:
+def export_outputs(returns_panel: pd.DataFrame, rx_factor: pd.DataFrame) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     returns_panel.to_csv(OUTPUT_DIR / "returns_panel.csv", index=False)
     rx_factor.to_csv(OUTPUT_DIR / "rx_factor.csv", index=False)
-    log.info("Written: returns_panel.csv (%d rows), rx_factor.csv (%d rows)",
-             len(returns_panel), len(rx_factor))
+    print("Written: returns_panel.csv")
+    print("Written: rx_factor.csv")
 
 
-def compute_all_returns(
-    panel: pd.DataFrame | None = None,
-    verbose: bool = False,
-) -> dict:
+def compute_all_returns(panel: pd.DataFrame | None = None) -> dict:
     """
     Run §2 returns pipeline.  Returns {'returns_panel', 'rx_factor'}.
     panel: cleaned FX panel from data.py; if None, reads fx_panel_clean.csv.
     """
-    log = _get_log(verbose)
-
+    print("Loading: §2 returns panel + RX factor ...")
     if panel is None:
-        panel = load_panel(log)
+        panel = load_panel()
     else:
         panel = panel.copy()
         if not pd.api.types.is_datetime64_any_dtype(panel["date"]):
@@ -233,15 +190,10 @@ def compute_all_returns(
         panel.sort_values(["currency_code", "date"], inplace=True)
         panel.reset_index(drop=True, inplace=True)
 
-    returns_panel = compute_returns(panel, log)
-    validate_returns(returns_panel, panel, log)
-    validate_quote_coverage(returns_panel, log)
-    cross_check_decomposition(returns_panel, log)
-    rx_factor = compute_rx_factor(returns_panel, log)
-    export_outputs(returns_panel, rx_factor, log)
+    returns_panel = compute_returns(panel)
+    validate_returns(returns_panel, panel)
+    cross_check_decomposition(returns_panel)
+    rx_factor = compute_rx_factor(returns_panel)
+    export_outputs(returns_panel, rx_factor)
 
     return {"returns_panel": returns_panel, "rx_factor": rx_factor}
-
-
-if __name__ == "__main__":
-    compute_all_returns(verbose=True)

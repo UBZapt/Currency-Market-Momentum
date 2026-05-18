@@ -12,8 +12,7 @@ Strategies (columns): MOM(1,1), MOM(6,1), MOM(12,1) at the §6-determined h* = 1
 Factor sources:
   MKTRF, SMB, HML, UMD : Kenneth French Data Library (ff_factors_clean.csv)
   HML_FX               : carry trade long-short CT from §7.1
-  VOL_FX               : monthly global FX volatility innovation factor
-                         (MSSS 2012a — monthly substitution per methodology §10.2)
+  VOL_FX               : monthly global FX volatility innovation factor (MSSS 2012a)
 
 VOL_FX construction (monthly, no daily data):
   σ^FX_t  = (1/N_t) · Σ_i |Δs_{i,t}|       ← cross-section mean of monthly |log spot change|
@@ -25,47 +24,20 @@ Inference: NW HAC with Andrews lag L = ceil(0.75 · T^(1/3)).
 """
 
 import math
-import logging
-import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
 
+from src.output_writer import add_sheet
+from src.stats         import nw_lag, sig_stars
+
 STRATEGIES        = [(1, 1), (6, 1), (12, 1)]
 UNIVARIATE_ORDER  = ["MKTRF", "SMB", "HML", "UMD", "HML_FX", "VOL_FX"]
 MULTIVARIATE_COLS = ["MKTRF", "SMB", "HML", "UMD"]
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section10")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-def _nw_lag(T: int) -> int:
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p):
-        return ""
-    if p < 0.01:
-        return "***"
-    if p < 0.05:
-        return "**"
-    if p < 0.10:
-        return "*"
-    return ""
 
 
 # ── Factor loading and VOL_FX construction ────────────────────────────────────
@@ -82,7 +54,7 @@ def _load_ff_factors() -> pd.DataFrame:
     return df
 
 
-def _build_vol_fx(returns_panel: pd.DataFrame, log: logging.Logger) -> pd.Series:
+def _build_vol_fx(returns_panel: pd.DataFrame) -> pd.Series:
     """
     Monthly VOL_FX innovation factor.
 
@@ -101,10 +73,7 @@ def _build_vol_fx(returns_panel: pd.DataFrame, log: logging.Logger) -> pd.Series
     y    = sigma.values[1:]
     xlag = sigma.values[:-1]
     X    = sm.add_constant(xlag, has_constant="add")
-    fit  = sm.OLS(y, X).fit()
-    a, rho = float(fit.params[0]), float(fit.params[1])
-    log.info("  VOL_FX AR(1): a=%.5f  ρ=%.4f  T=%d", a, rho, len(y))
-
+    fit = sm.OLS(y, X).fit()
     return pd.Series(fit.resid, index=sigma.index[1:], name="vol_fx")
 
 
@@ -119,7 +88,7 @@ def _factor_regression(y: pd.Series, X_df: pd.DataFrame) -> dict | None:
     Y = aligned["y"].values
     X = sm.add_constant(aligned.drop(columns="y").values, has_constant="add")
     T = len(aligned)
-    L = _nw_lag(T)
+    L = nw_lag(T)
     res = sm.OLS(Y, X).fit(cov_type="HAC", cov_kwds={"maxlags": L})
 
     return {
@@ -149,7 +118,7 @@ def _val(x: float, dp: int = 3) -> str:
 def _tstat(t: float, p: float) -> str:
     if math.isnan(t):
         return ""
-    return f"[{t:+.2f}]{_sig_stars(p)}"
+    return f"[{t:+.2f}]{sig_stars(p)}"
 
 
 # ── CSV export ────────────────────────────────────────────────────────────────
@@ -159,8 +128,6 @@ def _export_table15(panel_A: dict, panel_B: dict) -> None:
     Wide CSV: rows = factors (with [t-stat] sub-row), columns = α/β/R² × 3 strategies.
     Panel B keeps α and R² on the MKTRF row only; β fills per factor row.
     """
-    log = _get_log()
-
     strat_labels = [_strat_label(f, h) for f, h in STRATEGIES]
     metric_cols  = []
     for sl in strat_labels:
@@ -222,10 +189,7 @@ def _export_table15(panel_A: dict, panel_B: dict) -> None:
         rows.append(val_row)
         rows.append(t_row)
 
-    pd.DataFrame(rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / "table15_factor_regressions.csv", index=False
-    )
-    log.info("Written: table15_factor_regressions.csv")
+    add_sheet("table15_factor_regressions", pd.DataFrame(rows, columns=all_cols))
 
 
 # ── Terminal display ──────────────────────────────────────────────────────────
@@ -330,7 +294,6 @@ def run_section10(
     -------
     {"panel_A": ..., "panel_B": ..., "vol_fx": pd.Series}
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Load and align factors ──
@@ -343,9 +306,10 @@ def run_section10(
         factors.columns = [c if c == "date" else c.lower() for c in factors.columns]
     factors = factors.sort_values("date").set_index("date")
 
+    print("Loading: §10 factor regressions (Table 15) ...")
+
     # ── Build VOL_FX (monthly innovations) ──
-    log.info("§10 Building VOL_FX (monthly AR(1) residuals)")
-    vol_fx = _build_vol_fx(returns_panel, log)
+    vol_fx = _build_vol_fx(returns_panel)
 
     # ── HML_FX from §7.1 carry CT ──
     ct_df  = section7_result["ct_series"]
@@ -365,7 +329,6 @@ def run_section10(
     mom_y  = {_strat_label(f, h): grid_A[(f, h)] for f, h in STRATEGIES}
 
     # ── Panel A: univariate ──
-    log.info("§10 Panel A — Univariate regressions")
     panel_A: dict = {sl: {} for sl in mom_y}
     for sl, y in mom_y.items():
         for fac_name in UNIVARIATE_ORDER:
@@ -373,7 +336,6 @@ def run_section10(
             panel_A[sl][fac_name] = _factor_regression(y, X)
 
     # ── Panel B: multivariate 4-factor ──
-    log.info("§10 Panel B — Multivariate regressions (FF + Carhart)")
     panel_B: dict = {}
     for sl, y in mom_y.items():
         X = pd.DataFrame({fac: factor_series[fac] for fac in MULTIVARIATE_COLS})
@@ -381,7 +343,5 @@ def run_section10(
 
     _export_table15(panel_A, panel_B)
     _print_table15(panel_A, panel_B)
-    log.info("§10 complete: %d univariate × %d strategies + 4-factor × %d strategies",
-             len(UNIVARIATE_ORDER), len(mom_y), len(mom_y))
 
     return {"panel_A": panel_A, "panel_B": panel_B, "vol_fx": vol_fx}

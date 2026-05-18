@@ -3,15 +3,14 @@
 src/regressions.py — §3 short-term reversal test.
 """
 
-import json
-import logging
 import math
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+
+from src.output_writer import add_sheet
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
@@ -19,17 +18,6 @@ RETURNS_PATH = OUTPUT_DIR / "returns_panel.csv"
 
 _F_GRID  = [1, 3, 6, 9, 12]
 _MIN_OBS = 5   # minimum currencies per cross-sectional regression
-
-
-def _get_log(verbose: bool = False) -> logging.Logger:
-    log = logging.getLogger("regressions")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO if verbose else logging.WARNING)
-    return log
 
 
 def _build_lagged_panel(panel: pd.DataFrame, max_lag: int) -> pd.DataFrame:
@@ -65,7 +53,7 @@ def _nw_mean_tstat(series: np.ndarray, maxlags: int) -> tuple:
     return float(res.params[0]), float(res.bse[0]), float(res.tvalues[0]), float(res.pvalues[0])
 
 
-def _run_reversal_one_f(lagged: pd.DataFrame, f: int, log: logging.Logger) -> dict:
+def _run_reversal_one_f(lagged: pd.DataFrame, f: int) -> dict:
     """
     Cross-sectional FMB for one f. At realization date d (= t+1 in §3.1):
 
@@ -125,10 +113,6 @@ def _run_reversal_one_f(lagged: pd.DataFrame, f: int, log: logging.Logger) -> di
     _, se_a,   t_a,   p_a   = _nw_mean_tstat(beta1, L_andrews)
     _, se_12,  t_12,  p_12  = _nw_mean_tstat(beta1, 12)
 
-    log.info(
-        "f=%2d  T=%d  L=%d  b1=%+.4f  t(OLS)=%+.2f  t(NW-A)=%+.2f  t(NW-12)=%+.2f",
-        f, T_eff, L_andrews, beta1_mean, t_ols, t_a, t_12,
-    )
     return {
         "f":              f,
         "n_months":       T_eff,
@@ -146,33 +130,24 @@ def _run_reversal_one_f(lagged: pd.DataFrame, f: int, log: logging.Logger) -> di
     }
 
 
-def _export_outputs(table1: pd.DataFrame, decision: dict, log: logging.Logger) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def _export_outputs(table1: pd.DataFrame, decision: dict) -> None:
     out = table1.copy()
     for col in ("p_ols", "p_nw_andrews", "p_nw_12"):
         out[col] = out[col].round(3)
-    out.to_csv(OUTPUT_DIR / "table1_reversal.csv", index=False)
-    with open(OUTPUT_DIR / "skip_month_decision.json", "w") as fh:
-        json.dump(decision, fh, indent=2)
-    log.info(
-        "Written: table1_reversal.csv (%d rows), skip_month_decision.json", len(table1)
-    )
+    add_sheet("table1_reversal", out)
+    add_sheet("skip_month_decision",
+              pd.DataFrame([{"field": k, "value": v} for k, v in decision.items()]))
 
 
-def short_term_reversal(
-    returns_panel: pd.DataFrame | None = None,
-    verbose: bool = False,
-) -> dict:
+def short_term_reversal(returns_panel: pd.DataFrame | None = None) -> dict:
     """
     §3 short-term reversal test.
 
     skip_month_flag is derived from f=1 only (univariate, Andrews NW lag, two-tailed
-    5% threshold) — see Methodology_Detailed.md §3.3.
+    5% threshold) (§3.3).
 
     Returns {"table1": pd.DataFrame, "skip_month_flag": bool, "decision": dict}.
     """
-    log = _get_log(verbose)
-
     if returns_panel is None:
         if not RETURNS_PATH.exists():
             raise FileNotFoundError(
@@ -196,8 +171,9 @@ def short_term_reversal(
     if inf_mask.any():
         raise ValueError(f"{int(inf_mask.sum())} non-finite (Inf) excess_return values")
 
+    print("Loading: §3 short-term reversal test ...")
     lagged = _build_lagged_panel(returns_panel, max_lag=max(_F_GRID))
-    rows = [_run_reversal_one_f(lagged, f, log) for f in _F_GRID]
+    rows = [_run_reversal_one_f(lagged, f) for f in _F_GRID]
     table1 = pd.DataFrame(rows)
 
     f1 = table1.loc[table1["f"] == 1].iloc[0]
@@ -212,8 +188,7 @@ def short_term_reversal(
         "p_value_nw_andrews": float(f1["p_nw_andrews"]),
     }
 
-    log.info("skip_month_flag=%s", skip)
-    _export_outputs(table1, decision, log)
+    _export_outputs(table1, decision)
 
     return {"table1": table1, "skip_month_flag": skip, "decision": decision}
 
@@ -260,6 +235,3 @@ def print_reversal_table(result: dict) -> None:
     print("=" * W)
 
 
-if __name__ == "__main__":
-    res = short_term_reversal(verbose=True)
-    print_reversal_table(res)

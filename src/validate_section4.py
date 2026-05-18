@@ -37,11 +37,9 @@ def _get_log() -> logging.Logger:
 
 
 def _check(log, label, cond, detail=""):
-    label  = label.encode("ascii", "replace").decode("ascii")
-    detail = detail.encode("ascii", "replace").decode("ascii")
-    if cond:
-        log.info("PASS  %s  %s", label, detail)
-    else:
+    if not cond:
+        label  = label.encode("ascii", "replace").decode("ascii")
+        detail = detail.encode("ascii", "replace").decode("ascii")
         log.error("FAIL  %s  %s", label, detail)
     return cond
 
@@ -344,7 +342,6 @@ def run_section4_validation(
         ("A", "Signal-A", "excess_return"),
         ("B", "Signal-B", "spot_change"),
     ]:
-        log.info("--- %s ---", sig_label)
         try:
             signal_df = build_signal(returns_panel, f_test, sig_type)
         except Exception as e:
@@ -382,7 +379,6 @@ def run_section4_validation(
         all_ok &= validate_mom_series(mom_series, cohort_rets, h_test, label=sig_label)
 
     # OLS: construction smoke test only (full grid deferred to §5)
-    log.info("--- Signal-OLS (construction) ---")
     try:
         ols_sig   = build_signal(returns_panel, f_test, "OLS")
         first_d   = ols_sig["date"].min()
@@ -400,7 +396,6 @@ def run_section4_validation(
 
     # f=1, h=1 edge case (single-lag path)
     if f_test != 1:
-        log.info("--- Signal-A f=1 h=1 (edge case) ---")
         try:
             sig1  = build_signal(returns_panel, 1, "A")
             asgn1 = assign_portfolios(sig1)
@@ -414,14 +409,6 @@ def run_section4_validation(
             log.error("FAIL  f=1 edge case: %s", e)
             all_ok = False
 
-    log.info("Section 4 validation: %s", "ALL PASS" if all_ok else "FAILURES DETECTED")
+    if not all_ok:
+        log.error("Section 4 validation: FAILURES DETECTED")
     return all_ok
-
-
-if __name__ == "__main__":
-    if not RETURNS_PATH.exists():
-        raise FileNotFoundError(f"returns_panel not found: {RETURNS_PATH}")
-    rp = pd.read_csv(RETURNS_PATH)
-    rp["date"] = pd.to_datetime(rp["date"], dayfirst=True)
-    ok = run_section4_validation(returns_panel=rp, f_test=6, h_test=1)
-    sys.exit(0 if ok else 1)

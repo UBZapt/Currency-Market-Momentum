@@ -11,72 +11,22 @@ where σ̂_{i,t} is the rolling 36-month standard deviation of rx_i ending at t.
 
 Same dynamic sextile/quintile sort, same overlapping JT holding convention,
 and same NW HAC inference (Andrews lag) as the Signal A grid.
-
-§11.1 (alternative NW lags), §11.3 (BH multiple-testing correction), and
-§11.4 (alternative base currencies) are intentionally not implemented.
 """
 
 import math
-import logging
-import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
 
-from src.portfolios import build_mom_pipeline
+from src.portfolios    import build_mom_pipeline
+from src.output_writer import add_sheet
+from src.stats         import nw_stats, sig_stars
 
 F_GRID = [1, 3, 6, 9, 12]
 H_GRID = [1, 3, 6, 9, 12]
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section11")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-def _nw_lag(T: int) -> int:
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
-def _nw_stats(series) -> dict:
-    """NW HAC + standard t-stat for monthly return series — mirrors §5 _nw_stats."""
-    arr = np.asarray(series, dtype=float)
-    arr = arr[~np.isnan(arr)]
-    T   = len(arr)
-    if T < 5:
-        return {"mean": float("nan"), "t": float("nan"), "p": float("nan"),
-                "se": float("nan"), "nw_lag": 0, "T": T, "std_t": float("nan")}
-    L   = _nw_lag(T)
-    res = sm.OLS(arr, np.ones(T)).fit(cov_type="HAC", cov_kwds={"maxlags": L})
-    return {
-        "mean":   float(res.params[0]),
-        "t":      float(res.tvalues[0]),
-        "p":      float(res.pvalues[0]),
-        "se":     float(res.bse[0]),
-        "nw_lag": L,
-        "T":      T,
-        "std_t":  float(np.mean(arr) / (np.std(arr, ddof=1) / np.sqrt(T))),
-    }
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p):
-        return ""
-    if p < 0.01: return "***"
-    if p < 0.05: return "**"
-    if p < 0.10: return "*"
-    return ""
 
 
 # ── CSV export (same shape as table_fxh_signal_A.csv) ────────────────────────
@@ -121,10 +71,7 @@ def _export_tableA3(stats_dict: dict) -> None:
         + [spacer, hdr("p-value (3dp, NW HAC)")]
         + pval_rows
     )
-    pd.DataFrame(rows, columns=all_cols).to_csv(
-        OUTPUT_DIR / "tableA3_tsmom_grid.csv", index=False
-    )
-    _get_log().info("Written: tableA3_tsmom_grid.csv")
+    add_sheet("tableA3_tsmom_grid", pd.DataFrame(rows, columns=all_cols))
 
 
 # ── Terminal display (mirrors §5 f×h printout) ───────────────────────────────
@@ -152,7 +99,7 @@ def _print_tableA3(stats_dict: dict) -> None:
                 nw_line   += f"{'':>{col_w}}"
                 std_line  += f"{'':>{col_w}}"
             else:
-                nw_str  = f"[{s['t']:.2f}]{_sig_stars(s['p'])}"
+                nw_str  = f"[{s['t']:.2f}]{sig_stars(s['p'])}"
                 std_str = f"({s['std_t']:.2f})"
                 mean_line += f"{s['mean']*1200:>{col_w}.2f}"
                 nw_line   += f"{nw_str:>{col_w}}"
@@ -171,9 +118,9 @@ def run_section11(returns_panel: pd.DataFrame) -> dict:
 
     Returns {(f, h): pd.Series(index=date, mom_return)}.
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    print("Loading: §11.2 TSMOM f×h grid (Table A3) ...")
     grid_dict: dict = {}
     records: list  = []
 
@@ -181,8 +128,7 @@ def run_section11(returns_panel: pd.DataFrame) -> dict:
         for h in H_GRID:
             try:
                 mom = build_mom_pipeline(returns_panel, f, h, "TSMOM")
-            except Exception as e:
-                log.warning("  SKIP TSMOM f=%d h=%d: %s", f, h, e)
+            except Exception:
                 continue
 
             mom_valid = mom[mom["n_active_cohorts"] == h].dropna(subset=["mom_return"])
@@ -192,16 +138,16 @@ def run_section11(returns_panel: pd.DataFrame) -> dict:
                 records.append({"date": date, "f": f, "h": h, "mom_return": val})
 
     stats_dict = {
-        key: _nw_stats(series.values)
+        key: nw_stats(series.values)
         for key, series in grid_dict.items()
         if len(series) >= 5
     }
 
-    pd.DataFrame(records).sort_values(["f", "h", "date"]).reset_index(drop=True).to_csv(
-        OUTPUT_DIR / "fxh_series_TSMOM.csv", index=False
+    add_sheet(
+        "fxh_series_TSMOM",
+        pd.DataFrame(records).sort_values(["f", "h", "date"]).reset_index(drop=True),
     )
     _export_tableA3(stats_dict)
     _print_tableA3(stats_dict)
 
-    log.info("§11.2 TSMOM grid: %d cells computed", len(grid_dict))
     return grid_dict

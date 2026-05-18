@@ -17,28 +17,9 @@ Signal B additionally requires excess_return to be non-null at the formation dat
 so that every currency in the signal can actually generate a portfolio return.
 """
 
-import logging
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR   = PROJECT_ROOT / "output"
-RETURNS_PATH = OUTPUT_DIR / "returns_panel.csv"
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("signals")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.WARNING)
-    return log
 
 
 def _build_lag_panel(panel: pd.DataFrame, col: str, max_lag: int) -> pd.DataFrame:
@@ -159,7 +140,6 @@ def signal_rolling_ols(
     Fully out-of-sample: weights at t use only data through t-1.
     """
     _validate_panel(returns_panel, ["excess_return"])
-    log = _get_log()
 
     lp         = _build_lag_panel(returns_panel, "excess_return", f)
     lag_cols   = [f"lag_{k}" for k in range(1, f + 1)]
@@ -186,7 +166,6 @@ def signal_rolling_ols(
         X = sm.add_constant(train[lag_cols].values, has_constant="add")
 
         if np.linalg.matrix_rank(X) < X.shape[1]:
-            log.warning("OLS rank-deficient at %s — skipping", t_ym)
             continue
 
         coefs = sm.OLS(Y, X).fit().params[1:]  # drop intercept
@@ -243,14 +222,3 @@ def _validate_panel(panel: pd.DataFrame, required_cols: list) -> None:
         raise ValueError("returns_panel has duplicate (date, currency_code) keys")
 
 
-if __name__ == "__main__":
-    if not RETURNS_PATH.exists():
-        raise FileNotFoundError(f"returns_panel not found: {RETURNS_PATH}")
-    rp = pd.read_csv(RETURNS_PATH)
-    rp["date"] = pd.to_datetime(rp["date"], dayfirst=True)
-    for f in [1, 6]:
-        sa = signal_excess_return(rp, f)
-        sb = signal_spot_change(rp, f)
-        print(f"f={f}  Signal A: {len(sa)} rows  Signal B: {len(sb)} rows")
-    sols = signal_rolling_ols(rp, f=6)
-    print(f"OLS f=6: {len(sols)} rows, first date={sols['date'].min().date()}")

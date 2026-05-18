@@ -13,29 +13,10 @@ Functions (in call order):
 No inference, no result tables. All outputs are DataFrames ready for Section 5.
 """
 
-import logging
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR   = PROJECT_ROOT / "output"
-RETURNS_PATH = OUTPUT_DIR / "returns_panel.csv"
-
 from src.signals import build_signal
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("portfolios")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.WARNING)
-    return log
 
 
 def assign_portfolios(signal_df: pd.DataFrame) -> pd.DataFrame:
@@ -271,13 +252,3 @@ def build_portfolio_pipeline(
     return compute_portfolio_series(cohort_rets, h)
 
 
-if __name__ == "__main__":
-    if not RETURNS_PATH.exists():
-        raise FileNotFoundError(f"returns_panel not found: {RETURNS_PATH}")
-    rp = pd.read_csv(RETURNS_PATH)
-    rp["date"] = pd.to_datetime(rp["date"], dayfirst=True)
-
-    mom = build_mom_pipeline(rp, f=6, h=1, signal_type="A")
-    valid = mom.dropna(subset=["mom_return"])
-    print(valid.head(5))
-    print("First non-NaN MOM date:", valid["date"].min())

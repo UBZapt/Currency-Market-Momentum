@@ -13,75 +13,27 @@ h* = 1 (from §6 determination). skip_month_flag = False (§3).
 """
 
 import math
-import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR   = PROJECT_ROOT / "output"
 
-from src.signals    import build_signal
-from src.portfolios import (
+from src.signals       import build_signal
+from src.portfolios    import (
     assign_portfolios,
     compute_cohort_returns,
     compute_mom_series,
     compute_portfolio_series,
 )
+from src.output_writer import add_sheet
+from src.stats         import nw_stats, sig_stars
 
 F_GRID_CORR  = [1, 3, 6, 9, 12]
 F_GRID_DSORT = [1, 6, 12]
 H_STAR       = 1
-
-
-def _get_log() -> logging.Logger:
-    log = logging.getLogger("section7")
-    if not log.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
-        log.addHandler(h)
-        log.propagate = False
-    log.setLevel(logging.INFO)
-    return log
-
-
-# ── HAC inference (local copy matching sections 5/6) ─────────────────────────
-
-def _nw_lag(T: int) -> int:
-    return math.ceil(0.75 * T ** (1 / 3))
-
-
-def _nw_stats(series) -> dict:
-    arr = np.asarray(series, dtype=float)
-    arr = arr[~np.isnan(arr)]
-    T   = len(arr)
-    if T < 5:
-        return {"mean": np.nan, "t": np.nan, "p": np.nan,
-                "se": np.nan, "nw_lag": 0, "T": T, "sharpe": np.nan}
-    L      = _nw_lag(T)
-    res    = sm.OLS(arr, np.ones(T)).fit(cov_type="HAC", cov_kwds={"maxlags": L})
-    std    = float(np.std(arr, ddof=1))
-    sharpe = float(np.mean(arr) / std * np.sqrt(12)) if std > 0 else np.nan
-    return {
-        "mean":   float(res.params[0]),
-        "t":      float(res.tvalues[0]),
-        "p":      float(res.pvalues[0]),
-        "se":     float(res.bse[0]),
-        "nw_lag": L,
-        "T":      T,
-        "sharpe": sharpe,
-    }
-
-
-def _sig_stars(p: float) -> str:
-    if math.isnan(p): return ""
-    if p < 0.01: return "***"
-    if p < 0.05: return "**"
-    if p < 0.10: return "*"
-    return ""
 
 
 def _fmt(val, decimals=3) -> str:
@@ -161,7 +113,6 @@ def _build_table10(
     — the dynamic sextile/quintile sort used to build grid_A in §5 — so no
     signal/assign/cohort work is duplicated here.
     """
-    log         = _get_log()
     grid_A      = section5_result["grid_A"]
     grid_A_port = section5_result["grid_A_port_h1"]
 
@@ -171,7 +122,7 @@ def _build_table10(
 
     for p in range(1, max_p + 1):
         vals = carry_port_df[carry_port_df["portfolio"] == p]["avg_return"].dropna().values
-        s    = _nw_stats(vals)
+        s    = nw_stats(vals)
         if p == 1:
             lbl = "P1 (Low FD)"
         elif p == max_p:
@@ -188,7 +139,7 @@ def _build_table10(
             "T":        s["T"],
         })
 
-    ct_s = _nw_stats(ct_df["mom_return"].values)
+    ct_s = nw_stats(ct_df["mom_return"].values)
     rowsA.append({
         "part":     "A",
         "label":    "CT (HML carry)",
@@ -209,7 +160,7 @@ def _build_table10(
     print(f"  {'Portfolio':<20}{'Mean×1200':>12}{'NW t-stat':>12}{'p-value':>10}{'Sharpe':>10}{'T':>8}")
     print("-" * W)
     for r in rowsA:
-        t_star = _sig_stars(float(r["p_val"])) if r["p_val"] else ""
+        t_star = sig_stars(float(r["p_val"])) if r["p_val"] else ""
         print(
             f"  {r['label']:<20}"
             f"{r['mean_ann']:>12}"
@@ -228,7 +179,6 @@ def _build_table10(
     for f in F_GRID_CORR:
         key = (f, H_STAR)
         if key not in grid_A:
-            log.warning("  §7.2: grid_A missing (%d,%d) — skipping f=%d", f, H_STAR, f)
             continue
 
         mom_series = grid_A[key]
@@ -239,7 +189,6 @@ def _build_table10(
         # built by §5 from the same dynamic sort that produced grid_A.
         mom_port = grid_A_port.get(key)
         if mom_port is None or mom_port.empty:
-            log.warning("  §7.2: grid_A_port_h1 missing (%d,%d) — skipping f=%d", f, H_STAR, f)
             continue
         mom_pivot = mom_port.pivot(index="date", columns="portfolio", values="avg_return")
 
@@ -258,10 +207,6 @@ def _build_table10(
             **{k: _fmt(v) for k, v in port_corrs.items()},
             "N_overlap":    len(aligned_ct),
         })
-        log.info(
-            "  §7.2 f=%d: corr(CT,MOM)=%.3f  N_overlap=%d",
-            f, overall if not math.isnan(overall) else -99, len(aligned_ct)
-        )
 
     # Terminal print — Part B
     p_hdrs = ["P1", "P2", "P3", "P4", "P5", "P6"]
@@ -286,8 +231,7 @@ def _build_table10(
         + [{c: r.get(c, "") for c in col_order} for r in rowsB]
     )
     out = pd.DataFrame(combined, columns=col_order)
-    out.to_csv(OUTPUT_DIR / "table10_carry_correlations.csv", index=False)
-    log.info("Written: table10_carry_correlations.csv")
+    add_sheet("table10_carry_correlations", out)
     return out
 
 
@@ -435,7 +379,6 @@ def _build_table11(
     Mean × 1200 and [NW t-stat] reported. Stacked panels (one per f).
     Exports table11_double_sort.csv.
     """
-    log      = _get_log()
     FD_LBLS  = {1: "Low FD", 2: "Mid FD", 3: "High FD", "HML": "HML-FD"}
     MOM_LBLS = {1: "Low MOM", 2: "Mid MOM", 3: "High MOM", "HML_MOM": "HML-MOM"}
     MOM_COLS = [1, 2, 3, "HML_MOM"]
@@ -472,12 +415,12 @@ def _build_table11(
                 else:
                     series = cs.get((fd_row, mom_g), pd.Series(dtype=float))
 
-                s = _nw_stats(series.values)
+                s = nw_stats(series.values)
                 if math.isnan(s["mean"]):
                     mean_line  += f"{'N/A':>16}"
                     tstat_line += f"{'':>16}"
                 else:
-                    t_str = f"[{s['t']:.2f}]{_sig_stars(s['p'])}"
+                    t_str = f"[{s['t']:.2f}]{sig_stars(s['p'])}"
                     mean_line  += f"{s['mean']*1200:>16.2f}"
                     tstat_line += f"{t_str:>16}"
 
@@ -503,50 +446,8 @@ def _build_table11(
 
     out = pd.DataFrame(all_rows, columns=["f", "fd_group", "mom_group",
                                            "mean_ann", "t_stat", "p_val", "T"])
-    out.to_csv(OUTPUT_DIR / "table11_double_sort.csv", index=False)
-    log.info("Written: table11_double_sort.csv  (%d rows)", len(out))
+    add_sheet("table11_double_sort", out)
     return out
-
-
-# ── Notes export ──────────────────────────────────────────────────────────────
-
-def _write_notes(ct_df: pd.DataFrame, carry_port_df: pd.DataFrame) -> None:
-    ct_s   = _nw_stats(ct_df["mom_return"].values)
-    max_p  = int(carry_port_df["portfolio"].max())
-    lines  = [
-        "Section 7 — Carry Trade Implementation Notes",
-        "=" * 60,
-        "",
-        "1. CARRY SIGNAL TIMING",
-        "-" * 40,
-        "  forward_discount at returns_panel date=t+1 = f_t − s_t (known at end of t).",
-        "  Shifted back by MonthEnd(-1) so formation_date = t, matching §4/§5 convention.",
-        "  compute_cohort_returns looks up excess_return at formation_date+1 = t+1 ✓",
-        "",
-        "2. CARRY PORTFOLIO SUMMARY",
-        "-" * 40,
-        f"  T = {ct_s['T']} months  NW_lag = {ct_s['nw_lag']}",
-        f"  CT mean (annualised) = {round(ct_s['mean']*1200, 3)}%",
-        f"  CT NW t-stat         = {round(ct_s['t'], 3)}",
-        f"  CT Sharpe            = {round(ct_s['sharpe'], 3)}",
-        f"  n_portfolios (typical) = {max_p}",
-        "",
-        "3. DOUBLE SORT",
-        "-" * 40,
-        f"  f values: {F_GRID_DSORT}",
-        "  Outer sort: FD tertiles (linspace boundaries, extras to higher groups).",
-        "  Inner sort: MOM tertiles within each FD group, same convention.",
-        "  Drop month if N_outer < 9 or any FD sub-group < 3.",
-        "  h=1: every formation month is a single-period exit cohort.",
-        "",
-        "4. CORRELATION ANALYSIS",
-        "-" * 40,
-        f"  h* = {H_STAR} (from §6 determination).",
-        f"  MOM series extracted from section5_result['grid_A'][(f, {H_STAR})] — no re-computation.",
-        "  Sextile-by-sextile correlations use overlapping dates where both series have data.",
-    ]
-    (OUTPUT_DIR / "section7_notes.txt").write_text("\n".join(lines), encoding="utf-8")
-    _get_log().info("Written: section7_notes.txt")
 
 
 # ── Master function ────────────────────────────────────────────────────────────
@@ -567,26 +468,15 @@ def run_section7(
     -------
     dict with keys: ct_series, carry_port_series, table10, table11
     """
-    log = _get_log()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("§7.1 Building carry pipeline (h=1) ...")
+    print("Loading: §7.1 carry portfolio pipeline ...")
     ct_df, carry_port_df = _build_carry_pipeline(returns_panel)
-    log.info(
-        "  Carry CT: T=%d months, mean_ann=%.2f%%, NW t=%.2f",
-        len(ct_df),
-        _nw_stats(ct_df["mom_return"].values)["mean"] * 1200,
-        _nw_stats(ct_df["mom_return"].values)["t"],
-    )
-
-    log.info("§7.2 MOM-carry correlations ...")
-    carry_sig = _make_carry_signal(returns_panel)
-    table10   = _build_table10(ct_df, carry_port_df, section5_result)
-
-    log.info("§7.3 Double sort (f in %s) ...", F_GRID_DSORT)
-    table11   = _build_table11(returns_panel, carry_sig)
-
-    _write_notes(ct_df, carry_port_df)
+    carry_sig            = _make_carry_signal(returns_panel)
+    print("Loading: §7.2 MOM-carry correlations (Table 10) ...")
+    table10              = _build_table10(ct_df, carry_port_df, section5_result)
+    print("Loading: §7.3 double sort (Table 11) ...")
+    table11              = _build_table11(returns_panel, carry_sig)
 
     return {
         "ct_series":        ct_df,
