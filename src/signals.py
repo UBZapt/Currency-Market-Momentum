@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+src/signals.py — §4 signal construction machinery.
+
+Three signal types (§5.1, §5.4):
+  A  — equal-weighted excess return  (signal_excess_return)
+  B  — equal-weighted spot change    (signal_spot_change)
+  OLS— rolling OLS-weighted          (signal_rolling_ols)
+
+All signals return (date, currency_code, signal) with date = formation month.
+
+Signal window convention (§5.1, no skip-month — confirmed by §3 reversal test):
+  S_{i,t} = col_t + col_{t-1} + ... + col_{t-f+1}   (f terms)
+  = current formation-date value + (f-1) prior lags.
+
+Signal B additionally requires excess_return to be non-null at the formation date
+so that every currency in the signal can actually generate a portfolio return.
+"""
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+
+def _build_lag_panel(panel: pd.DataFrame, col: str, max_lag: int) -> pd.DataFrame:
+    """
+    Period-merge lag_1 … lag_{max_lag} for column `col`.
+    Non-consecutive months produce NaN (never paired across gaps).
+    Returns DataFrame with [date, currency_code, col, ym, lag_1, ..., lag_{max_lag}].
+    """
+    base = panel[["date", "currency_code", col]].copy()
+    base["ym"] = base["date"].dt.to_period("M")
+    result = base.copy()
+    for k in range(1, max_lag + 1):
+        src = base[["currency_code", "ym", col]].rename(columns={col: f"lag_{k}"}).copy()
+        src["ym"] = src["ym"] + k
+        result = result.merge(src, on=["currency_code", "ym"], how="left")
+    return result
+
+
+def _rolling_sum_signal(returns_panel: pd.DataFrame, col: str, f: int) -> pd.DataFrame:
+    """
+    Build f-month rolling sum signal for column `col`.
+    Signal = col[t] + lag_1..lag_{f-1}[t]  (f terms, §5.1).
+    NaN where any of the f terms is missing.
+    """
+    lp = _build_lag_panel(returns_panel, col, max(f - 1, 0))
+    if f == 1:
+        lp["signal"] = lp[col]
+    else:
+        lp["signal"] = lp[[col] + [f"lag_{k}" for k in range(1, f)]].sum(axis=1, min_count=f)
+    return (
+        lp[["date", "currency_code", "signal"]]
+        .dropna(subset=["signal"])
+        .reset_index(drop=True)
+    )
+
+
+def signal_excess_return(returns_panel: pd.DataFrame, f: int) -> pd.DataFrame:
+    """Signal A (§5.1): S_{i,t} = rx_t + rx_{t-1} + ... + rx_{t-f+1}."""
+    _validate_panel(returns_panel, ["excess_return"])
+    return _rolling_sum_signal(returns_panel, "excess_return", f)
+
+
+def signal_spot_change(returns_panel: pd.DataFrame, f: int) -> pd.DataFrame:
+    """
+    Signal B (§5.1): S_{i,t}^B = -Σ Δs_{i,t-j+1}.
+    spot_change is already sign-flipped so the sum equals the negated cumulative spot change.
+    Restricted to currencies with non-null excess_return at formation (required for portfolio returns).
+    """
+    _validate_panel(returns_panel, ["spot_change", "excess_return"])
+    out = _rolling_sum_signal(returns_panel, "spot_change", f)
+    rx_avail = (
+        returns_panel[["date", "currency_code", "excess_return"]]
+        .dropna(subset=["excess_return"])[["date", "currency_code"]]
+    )
+    return out.merge(rx_avail, on=["date", "currency_code"], how="inner").reset_index(drop=True)
+
+
+def signal_volatility_scaled(
+    returns_panel: pd.DataFrame,
+    f: int,
+    sigma_window: int = 36,
+) -> pd.DataFrame:
+    """
+    TSMOM signal (§11.2, Moskowitz/Ooi/Pedersen 2012):
+
+        S_{i,t}^{TSMOM} = ( Σ_{j=0}^{f-1} rx_{i,t-j} ) / σ̂_{i,t}
+
+    where σ̂_{i,t} is the rolling `sigma_window`-month standard deviation of
+    rx_i ending at t (inclusive of t).  Period-merge based: σ is computed
+    only when all `sigma_window` consecutive months are present, so the
+    estimator never silently crosses currency-level data gaps.
+
+    Numerator follows the same no-skip convention as Signal A (§5.1).
+    """
+    _validate_panel(returns_panel, ["excess_return"])
+
+    # Numerator: f-month cumulative excess return ending at t
+    num = (
+        _rolling_sum_signal(returns_panel, "excess_return", f)
+        .rename(columns={"signal": "_num"})
+    )
+
+    # Denominator: rolling sigma_window-month std (period-merge for consecutive months)
+    lp     = _build_lag_panel(returns_panel, "excess_return", sigma_window - 1)
+    rx_cols = ["excess_return"] + [f"lag_{k}" for k in range(1, sigma_window)]
+    lp     = lp.dropna(subset=rx_cols)
+    if lp.empty:
+        raise ValueError(
+            f"signal_volatility_scaled: no rows with {sigma_window} consecutive months of rx"
+        )
+    sigma_df = lp[["date", "currency_code"]].copy()
+    sigma_df["sigma"] = lp[rx_cols].std(axis=1, ddof=1)
+    sigma_df = sigma_df[sigma_df["sigma"] > 0]
+
+    merged = num.merge(sigma_df, on=["date", "currency_code"], how="inner")
+    merged["signal"] = merged["_num"] / merged["sigma"]
+
+    return (
+        merged[["date", "currency_code", "signal"]]
+        .dropna(subset=["signal"])
+        .sort_values(["date", "currency_code"])
+        .reset_index(drop=True)
+    )
+
+
+def signal_rolling_ols(
+    returns_panel: pd.DataFrame,
+    f: int,
+    initial_window: int = 36,
+) -> pd.DataFrame:
+    """
+    Rolling OLS signal (§5.4).
+
+    At each formation month t, estimates pooled OLS on all (i,τ) with τ < t:
+      rx_{i,τ+1} = α + Σ_{j=1}^{f} β_j · rx_{i,τ-j+1} + ε
+    then applies β̂ to the f lagged values at t:
+      S_{i,t}^OLS = β̂ · [rx_t, rx_{t-1}, ..., rx_{t-f+1}]
+    Fully out-of-sample: weights at t use only data through t-1.
+    """
+    _validate_panel(returns_panel, ["excess_return"])
+
+    lp         = _build_lag_panel(returns_panel, "excess_return", f)
+    lag_cols   = [f"lag_{k}" for k in range(1, f + 1)]
+    apply_cols = ["excess_return"] + [f"lag_{k}" for k in range(1, f)]
+
+    pool = lp.dropna(subset=["excess_return"] + lag_cols).copy()
+
+    first_rx_date = returns_panel.dropna(subset=["excess_return"])["date"].min()
+    first_form_ym = first_rx_date.to_period("M") + initial_window
+    form_months   = sorted(ym for ym in lp["ym"].unique() if ym >= first_form_ym)
+
+    if not form_months:
+        raise ValueError(
+            f"No formation months after initial_window={initial_window} from {first_rx_date.date()}"
+        )
+
+    records = []
+    for t_ym in form_months:
+        train = pool[pool["ym"] < t_ym]
+        if len(train) < f + 2:
+            continue
+
+        Y = train["excess_return"].values
+        X = sm.add_constant(train[lag_cols].values, has_constant="add")
+
+        if np.linalg.matrix_rank(X) < X.shape[1]:
+            continue
+
+        coefs = sm.OLS(Y, X).fit().params[1:]  # drop intercept
+
+        cur = lp[lp["ym"] == t_ym].dropna(subset=apply_cols).reset_index(drop=True)
+        if cur.empty:
+            continue
+        batch = cur[["date", "currency_code"]].copy()
+        batch["signal"] = cur[apply_cols].values @ coefs
+        records.append(batch)
+
+    if not records:
+        raise ValueError("signal_rolling_ols produced no signals — check data coverage")
+
+    return (
+        pd.concat(records, ignore_index=True)
+        .sort_values(["date", "currency_code"])
+        .reset_index(drop=True)
+    )[["date", "currency_code", "signal"]]
+
+
+def build_signal(
+    returns_panel: pd.DataFrame,
+    f: int,
+    signal_type: str = "A",
+) -> pd.DataFrame:
+    """
+    Dispatcher. signal_type: 'A' | 'B' | 'OLS' | 'TSMOM'.
+    Returns (date, currency_code, signal).
+    Internal windows (OLS initial_window=36, TSMOM sigma_window=36) are set
+    inside the respective signal functions per methodology §5.4 / §11.2;
+    callers cannot supply them, which prevents stray windows from silently
+    propagating to Signal A or B (where they are irrelevant).
+    """
+    if signal_type == "A":
+        return signal_excess_return(returns_panel, f)
+    if signal_type == "B":
+        return signal_spot_change(returns_panel, f)
+    if signal_type == "OLS":
+        return signal_rolling_ols(returns_panel, f)
+    if signal_type == "TSMOM":
+        return signal_volatility_scaled(returns_panel, f)
+    raise ValueError(
+        f"Unknown signal_type '{signal_type}'. Use 'A', 'B', 'OLS', or 'TSMOM'."
+    )
+
+
+def _validate_panel(panel: pd.DataFrame, required_cols: list) -> None:
+    needed  = {"date", "currency_code"} | set(required_cols)
+    missing = needed - set(panel.columns)
+    if missing:
+        raise ValueError(f"returns_panel missing required columns: {missing}")
+    if panel.duplicated(subset=["date", "currency_code"]).any():
+        raise ValueError("returns_panel has duplicate (date, currency_code) keys")
+
+
